@@ -1,6 +1,6 @@
 {
   "name": "dmux",
-  "version": "5.10.0",
+  "version": "5.11.0",
   "description": "Tmux pane manager with AI agent integration for parallel development workflows",
   "type": "module",
   "author": "Justin Schroeder",
@@ -66,8 +66,8 @@
     "prepublishOnly": "pnpm run build",
     "prerelease": "run-s clean build typecheck smoke:pack",
     "release": "bumpp --commit --push --tag",
-    "release:minor": "bumpp minor --commit --push --tag",
-    "release:major": "bumpp major --commit --push --tag"
+    "release:minor": "bumpp --release minor --commit --push --tag",
+    "release:major": "bumpp --release major --commit --push --tag"
   },
   "bin": {
     "dmux": "./dmux"
