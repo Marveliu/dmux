@@ -261,6 +261,21 @@ describe('command builders', () => {
     );
   });
 
+  it('uses an exact session ID when the agent supports it', () => {
+    expect(buildResumeCommand(
+      'codex',
+      'bypassPermissions',
+      'abcdefab-1234-5678-9abc-abcdefabcdef'
+    )).toBe(
+      "codex resume 'abcdefab-1234-5678-9abc-abcdefabcdef' --dangerously-bypass-approvals-and-sandbox"
+    );
+    expect(buildResumeCommand(
+      'claude',
+      undefined,
+      '12345678-1234-1234-1234-123456789abc'
+    )).toBe("claude --resume '12345678-1234-1234-1234-123456789abc'");
+  });
+
   it('wraps supported initial prompts in /goal when goal mode is enabled', () => {
     expect(buildGoalModePrompt('claude', 'fix the failing test', true)).toBe(
       '/goal fix the failing test'

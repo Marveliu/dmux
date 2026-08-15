@@ -13,6 +13,11 @@ interface OpenRouterOnboardingEntry {
 
 interface OnboardingState {
   openRouterApiKeyOnboarding?: OpenRouterOnboardingEntry;
+  inferenceProviderOnboarding?: {
+    completed: boolean;
+    completedAt: string;
+    outcome: 'configured' | 'skip';
+  };
   [key: string]: unknown;
 }
 
@@ -192,6 +197,34 @@ export async function writeOpenRouterOnboardingState(
     },
   };
 
+  await fs.mkdir(path.dirname(statePath), { recursive: true });
+  await fs.writeFile(statePath, JSON.stringify(nextState, null, 2), 'utf-8');
+}
+
+export async function hasCompletedInferenceProviderOnboarding(homeDir: string): Promise<boolean> {
+  const state = await readOnboardingState(homeDir);
+  // Existing users already answered the OpenRouter-era onboarding prompt.
+  // Preserve that choice; they can opt into the provider picker from Settings.
+  return (
+    state.inferenceProviderOnboarding?.completed === true
+    || state.openRouterApiKeyOnboarding?.completed === true
+  );
+}
+
+export async function writeInferenceProviderOnboardingState(
+  homeDir: string,
+  outcome: 'configured' | 'skip'
+): Promise<void> {
+  const statePath = getOnboardingStatePath(homeDir);
+  const currentState = await readOnboardingState(homeDir);
+  const nextState: OnboardingState = {
+    ...currentState,
+    inferenceProviderOnboarding: {
+      completed: true,
+      completedAt: new Date().toISOString(),
+      outcome,
+    },
+  };
   await fs.mkdir(path.dirname(statePath), { recursive: true });
   await fs.writeFile(statePath, JSON.stringify(nextState, null, 2), 'utf-8');
 }

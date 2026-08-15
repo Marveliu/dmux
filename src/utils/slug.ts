@@ -1,3 +1,5 @@
+import { generateInferenceText } from '../services/InferenceService.js';
+
 const MAX_SLUG_LENGTH = 48;
 const MAX_LOCAL_SLUG_WORDS = 4;
 
@@ -201,47 +203,15 @@ export const generateSlug = async (prompt: string): Promise<string> => {
   const fallbackSlug = generateLocalSlugFromPrompt(prompt);
   if (!prompt.trim()) return fallbackSlug;
 
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (apiKey) {
-    // Try multiple models with fallback
-    const models = [
-      'google/gemini-2.5-flash',
-      'openai/gpt-4o-mini',
-      'openai/gpt-oss-120b:free',
-    ];
-
-    for (const model of models) {
-      try {
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              {
-                role: 'user',
-                content: `Generate a 1-2 word kebab-case slug for this prompt. Only respond with the slug, nothing else: "${prompt}"`
-              }
-            ],
-            max_tokens: 10,
-            temperature: 0.3
-          })
-        });
-
-        if (response.ok) {
-          const data = await response.json() as any;
-          const content = data?.choices?.[0]?.message?.content || '';
-          const slug = normalizeSlugCandidate(content);
-          if (slug) return slug;
-        }
-      } catch {
-        // Try next model
-        continue;
-      }
-    }
+  try {
+    const content = await generateInferenceText(
+      `Generate a 1-2 word kebab-case slug for this prompt. Only respond with the slug, nothing else: "${prompt}"`,
+      { maxTokens: 10, temperature: 0.3 }
+    );
+    const slug = normalizeSlugCandidate(content || '');
+    if (slug) return slug;
+  } catch {
+    // Fall back to deterministic local naming.
   }
 
   return fallbackSlug;

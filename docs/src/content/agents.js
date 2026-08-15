@@ -67,7 +67,7 @@ export function render() {
     <p>The detection works by:</p>
     <ol>
       <li><strong>Activity tracking</strong> — if the terminal content is changing, the agent is considered "working"</li>
-      <li><strong>LLM analysis</strong> — when activity stops, dmux uses lightweight OpenRouter models, with a free JSON-capable fallback, to analyze the terminal content and determine if the agent is waiting for input, showing a dialog, or idle</li>
+      <li><strong>LLM analysis</strong> — when activity stops, dmux uses your selected primary inference model (and optional backup) to determine if the agent is waiting for input, showing a dialog, or idle</li>
       <li><strong>User typing detection</strong> — if the user is typing, dmux avoids false positives</li>
     </ol>
     <p>Each pane has its own worker thread that polls every second without blocking the main UI.</p>

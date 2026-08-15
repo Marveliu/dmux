@@ -61,10 +61,13 @@ const PaneCard: React.FC<PaneCardProps> = memo(({
   const paneName = getPaneDisplayName(pane);
 
   // Right-aligned columns: [cc] = 4 chars, (ap) = 4 chars, space between = 1
-  const hasAgent = pane.type === 'shell' || !!pane.agent;
-  const agentTag = pane.type === 'shell'
-    ? (pane.shellType || 'sh').substring(0, 2)
-    : pane.agent ? getAgentShortLabel(pane.agent) : null;
+  const displayedAgent = pane.activeAgent || (pane.type !== 'shell' ? pane.agent : undefined);
+  const hasAgent = pane.type === 'shell' || !!displayedAgent;
+  const agentTag = displayedAgent
+    ? getAgentShortLabel(displayedAgent)
+    : pane.type === 'shell'
+      ? (pane.shellType || 'sh').substring(0, 2)
+      : null;
   const apTag = pane.autopilot ? 'ap' : null;
 
   // Keep non-title segments fixed; only slug is allowed to clip.
@@ -90,7 +93,11 @@ const PaneCard: React.FC<PaneCardProps> = memo(({
     : selected
       ? paneSelectedColor
       : COLORS.unselected;
-  const shellTagColor = isFileBrowserPane ? 'yellow' : pane.type === 'shell' ? 'cyan' : 'gray';
+  const shellTagColor = isFileBrowserPane
+    ? 'yellow'
+    : pane.type === 'shell' && !displayedAgent
+      ? 'cyan'
+      : 'gray';
 
   return (
     <Box width={ROW_WIDTH}>
@@ -141,6 +148,7 @@ const PaneCard: React.FC<PaneCardProps> = memo(({
     prevProps.pane.type === nextProps.pane.type &&
     prevProps.pane.shellType === nextProps.pane.shellType &&
     prevProps.pane.agent === nextProps.pane.agent &&
+    prevProps.pane.activeAgent === nextProps.pane.activeAgent &&
     prevProps.pane.colorTheme === nextProps.pane.colorTheme &&
     prevProps.isDevSource === nextProps.isDevSource &&
     prevProps.selected === nextProps.selected &&

@@ -44,6 +44,9 @@ export interface DmuxPane {
   id: string;
   slug: string;
   displayName?: string; // User-facing pane name (independent from worktree slug/branch)
+  displayNameSource?: 'auto' | 'human'; // Human names are never replaced by terminal auto-naming
+  lastAutoNamedAt?: number; // Last successful automatic terminal rename
+  lastAutoNameFingerprint?: string; // Screen content used for the last automatic name
   branchName?: string; // Git branch name (may differ from slug when branchPrefix is set)
   prompt: string;
   paneId: string;
@@ -53,6 +56,8 @@ export interface DmuxPane {
   colorTheme?: DmuxThemeName; // Cached effective project accent for fast focus/theme switches
   type?: 'worktree' | 'shell';  // Type of pane (defaults to 'worktree' for backward compat)
   shellType?: string;  // Shell type for shell panes (bash, zsh, fish, fb, etc)
+  shellCwd?: string; // Last observed cwd, used to restore regular terminal panes
+  shellCommand?: string; // Dmux-owned command to relaunch (for example the file browser)
   worktreePath?: string;
   browserPath?: string; // Root path when a shell pane is a dmux file browser
   testWindowId?: string;  // Background window for tests
@@ -62,6 +67,10 @@ export interface DmuxPane {
   devStatus?: 'running' | 'stopped';
   devUrl?: string;        // Detected dev server URL
   agent?: AgentName;
+  activeAgent?: AgentName; // Agent process currently observed in this pane
+  agentProcessId?: number; // Used to detect a manually launched replacement process
+  agentSessionId?: string; // Exact resumable CLI session when discoverable
+  lastAgentObservedAt?: number;
   permissionMode?: PermissionMode;
   agentStatus?: AgentStatus;  // Agent working/attention status
   needsAttention?: boolean; // Pane has settled and is waiting on the user
@@ -104,6 +113,16 @@ export interface ProjectSettings {
   firstDevRun?: boolean;   // Track if dev has been run before
 }
 
+export interface InferenceTarget {
+  providerId: string;
+  modelId: string;
+  // Custom OpenAI-compatible providers carry their connection metadata with
+  // the selection. API keys remain in the environment/credential store.
+  providerName?: string;
+  baseUrl?: string;
+  envKey?: string;
+}
+
 export interface DmuxSettings {
   // Agent permission mode
   // '' = agent default behavior (usually prompts for permissions)
@@ -143,6 +162,10 @@ export interface DmuxSettings {
   maxPaneWidth?: number;
   // Display language ('en' for English, 'ja' for Japanese)
   language?: 'en' | 'ja';
+  // Provider/model used for dmux's lightweight inference features.
+  inferencePrimary?: InferenceTarget;
+  // Optional failover provider/model. null explicitly disables failover.
+  inferenceBackup?: InferenceTarget | null;
 }
 
 export interface NewPaneInput {

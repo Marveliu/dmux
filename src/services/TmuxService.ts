@@ -264,11 +264,11 @@ export class TmuxService {
    */
   async getAllPaneInfo(
     scope: PaneListScope = 'window'
-  ): Promise<Array<PanePosition & { title: string }>> {
+  ): Promise<Array<PanePosition & { title: string; currentPath?: string }>> {
     const output = await this.executeNonBlocking(
       scope === 'window'
-        ? `tmux list-panes -F '#{pane_id}|#{pane_title}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}'`
-        : `tmux list-panes -a -F '#{session_name}|#{pane_id}|#{pane_title}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}'`
+        ? `tmux list-panes -F '#{pane_id}|#{pane_title}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}|#{pane_current_path}'`
+        : `tmux list-panes -a -F '#{session_name}|#{pane_id}|#{pane_title}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}|#{pane_current_path}'`
     );
     const currentSession = scope === 'session'
       ? await this.executeNonBlocking(`tmux display-message -p "#{session_name}"`)
@@ -290,7 +290,7 @@ export class TmuxService {
           return [];
         }
 
-        const [paneId, title, left, top, width, height] = values;
+        const [paneId, title, left, top, width, height, currentPath] = values;
         return [{
           paneId,
           title,
@@ -298,6 +298,7 @@ export class TmuxService {
           top: parseInt(top, 10),
           width: parseInt(width, 10),
           height: parseInt(height, 10),
+          currentPath: currentPath || undefined,
         }];
       });
   }
@@ -640,6 +641,18 @@ export class TmuxService {
         this.execute(`tmux display-message -t '${paneId}' -p '#{pane_current_command}'`).trim(),
       RetryStrategy.FAST,
       `getPaneCurrentCommand(${paneId})`
+    );
+  }
+
+  /**
+   * Get the current working directory reported by tmux for a pane.
+   */
+  async getPaneCurrentPath(paneId: string): Promise<string> {
+    return this.executeWithRetry(
+      () =>
+        this.execute(`tmux display-message -t '${paneId}' -p '#{pane_current_path}'`).trim(),
+      RetryStrategy.IDEMPOTENT,
+      `getPaneCurrentPath(${paneId})`
     );
   }
 

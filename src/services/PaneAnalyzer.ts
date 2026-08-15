@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import { capturePaneContent } from '../utils/paneCapture.js';
 import { LogService } from './LogService.js';
 import { getPaneDisplayName } from '../utils/paneTitle.js';
+import { generateInferenceText, hasConfiguredInferenceSync } from './InferenceService.js';
 
 // State types for agent status
 export type PaneState = 'option_dialog' | 'open_prompt' | 'in_progress';
@@ -69,16 +70,6 @@ export function normalizePaneContentForAnalysis(
 }
 
 export class PaneAnalyzer {
-  private apiKey: string;
-  private preferredModelStack: string[] = [
-    'google/gemini-2.5-flash',
-    'openai/gpt-4o-mini'
-  ];
-  private freeFallbackModelStack: string[] = [
-    'openai/gpt-oss-120b:free',
-    'nvidia/nemotron-3-super-120b-a12b:free'
-  ];
-
   // Content-hash based cache to avoid repeated API calls for identical content
   private cache = new Map<string, CacheEntry>();
   private readonly CACHE_TTL = 5000; // 5 seconds TTL
@@ -86,10 +77,6 @@ export class PaneAnalyzer {
 
   // Request deduplication - prevent multiple concurrent requests for same pane
   private pendingRequests = new Map<string, Promise<PaneAnalysis>>();
-
-  constructor() {
-    this.apiKey = process.env.OPENROUTER_API_KEY || '';
-  }
 
   /**
    * Hash content for cache key
@@ -133,134 +120,22 @@ export class PaneAnalyzer {
   }
 
 
-  /**
-   * Make a single API request to a specific model
-   */
-  private async tryModel(
-    model: string,
-    systemPrompt: string,
-    userPrompt: string,
-    maxTokens: number,
-    signal?: AbortSignal
-  ): Promise<any> {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://github.com/dmux/dmux',
-        'X-Title': 'dmux',
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.1,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' },
-      }),
-      signal
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`API error (${model}): ${response.status} ${errorText}`);
-    }
-
-    return response.json();
-  }
-
-  private async raceModelStack(
-    models: readonly string[],
-    systemPrompt: string,
-    userPrompt: string,
-    maxTokens: number,
-    signal: AbortSignal
-  ): Promise<any> {
-    const logService = LogService.getInstance();
-
-    try {
-      return await Promise.any(
-        models.map(model =>
-          this.tryModel(model, systemPrompt, userPrompt, maxTokens, signal)
-            .then(data => {
-              logService.debug(`PaneAnalyzer: Model ${model} succeeded`, 'paneAnalyzer');
-              return data;
-            })
-        )
-      );
-    } catch (error) {
-      if (error instanceof AggregateError) {
-        throw error.errors[0] || new Error('All models in fallback stack failed');
-      }
-      throw error;
-    }
-  }
-
-  private formatModelError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
-
-  /**
-   * Makes a request to OpenRouter API with tiered model fallback.
-   * Preferred models race in parallel so the fastest healthy paid model wins.
-   * If they are unavailable or the key is capped, a tested free JSON-capable model
-   * gets a second chance without winning normal healthy requests by speed alone.
-   */
+  /** Make a request through the configured primary/backup inference stack. */
   private async makeRequestWithFallback(
     systemPrompt: string,
     userPrompt: string,
     maxTokens: number,
     signal?: AbortSignal
   ): Promise<any> {
-    if (!this.apiKey) {
-      throw new Error('API key not available');
-    }
-
-    // Create an AbortController with timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s total timeout
-
-    // Combine external signal with our timeout
-    const combinedSignal = signal
-      ? AbortSignal.any([signal, controller.signal])
-      : controller.signal;
-
-    try {
-      try {
-        return await this.raceModelStack(
-          this.preferredModelStack,
-          systemPrompt,
-          userPrompt,
-          maxTokens,
-          combinedSignal
-        );
-      } catch (primaryError) {
-        LogService.getInstance().debug(
-          `PaneAnalyzer: Preferred models failed; trying free fallback (${this.formatModelError(primaryError)})`,
-          'paneAnalyzer'
-        );
-
-        try {
-          return await this.raceModelStack(
-            this.freeFallbackModelStack,
-            systemPrompt,
-            userPrompt,
-            maxTokens,
-            combinedSignal
-          );
-        } catch (fallbackError) {
-          throw new Error(
-            `All models failed. Primary: ${this.formatModelError(primaryError)}. ` +
-            `Free fallback: ${this.formatModelError(fallbackError)}`
-          );
-        }
-      }
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    const content = await generateInferenceText(userPrompt, {
+      system: systemPrompt,
+      maxTokens,
+      temperature: 0.1,
+      timeoutMs: 10_000,
+      signal,
+    });
+    if (!content) throw new Error('Inference provider not available');
+    return { choices: [{ message: { content } }] };
   }
 
   /**
@@ -272,9 +147,8 @@ export class PaneAnalyzer {
   async determineState(content: string, signal?: AbortSignal, paneName?: string): Promise<PaneState> {
     const logService = LogService.getInstance();
 
-    if (!this.apiKey) {
-      // API key not set
-      logService.debug(`PaneAnalyzer: No API key set, defaulting to in_progress state${paneName ? ` for "${paneName}"` : ''}`, 'paneAnalyzer');
+    if (!hasConfiguredInferenceSync()) {
+      logService.debug(`PaneAnalyzer: No inference provider configured, defaulting to in_progress state${paneName ? ` for "${paneName}"` : ''}`, 'paneAnalyzer');
       return 'in_progress';
     }
 
@@ -357,8 +231,8 @@ CRITICAL:
     const logService = LogService.getInstance();
     const paneName = context.paneName;
 
-    if (!this.apiKey) {
-      logService.debug(`PaneAnalyzer: No API key set, cannot extract options${paneName ? ` for "${paneName}"` : ''}`, 'paneAnalyzer');
+    if (!hasConfiguredInferenceSync()) {
+      logService.debug(`PaneAnalyzer: No inference provider configured, cannot extract options${paneName ? ` for "${paneName}"` : ''}`, 'paneAnalyzer');
       return {};
     }
 
@@ -470,7 +344,7 @@ ${content}`,
     context: PaneContext,
     signal?: AbortSignal
   ): Promise<Pick<PaneAnalysis, 'summary' | 'attentionTitle' | 'attentionBody'>> {
-    if (!this.apiKey) {
+    if (!hasConfiguredInferenceSync()) {
       return {};
     }
 

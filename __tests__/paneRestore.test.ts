@@ -56,4 +56,80 @@ describe('pane restoration', () => {
     );
     expect(tmuxServiceMock.sendTmuxKeys).toHaveBeenCalledWith('%9', 'Enter');
   });
+
+  it('restores a regular terminal in its persisted working directory', async () => {
+    const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+    const cwd = process.cwd();
+    const pane: DmuxPane = {
+      id: 'dmux-2',
+      slug: 'shell-2',
+      displayName: 'Run Integration Tests',
+      displayNameSource: 'auto',
+      prompt: '',
+      paneId: '%3',
+      type: 'shell',
+      shellType: 'zsh',
+      shellCwd: cwd,
+      projectRoot: cwd,
+    };
+
+    await recreateMissingPanes([pane], `${cwd}/.dmux/dmux.config.json`);
+
+    expect(splitPaneMock).toHaveBeenCalledWith({ cwd, command: undefined });
+    expect(tmuxServiceMock.setPaneTitle).toHaveBeenCalledWith(
+      '%9',
+      'Run Integration Tests__dmux__shell-2'
+    );
+    expect(pane.paneId).toBe('%9');
+    expect(tmuxServiceMock.sendShellCommand).not.toHaveBeenCalled();
+    expect(tmuxServiceMock.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it('resumes the exact manually launched agent session for a restored terminal', async () => {
+    const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+    const cwd = process.cwd();
+    const pane: DmuxPane = {
+      id: 'dmux-4',
+      slug: 'shell-4',
+      prompt: '',
+      paneId: '%5',
+      type: 'shell',
+      shellType: 'zsh',
+      shellCwd: cwd,
+      agent: 'claude',
+      activeAgent: 'claude',
+      agentSessionId: '12345678-1234-1234-1234-123456789abc',
+    };
+
+    await recreateMissingPanes([pane], `${cwd}/.dmux/dmux.config.json`);
+
+    expect(tmuxServiceMock.sendShellCommand).toHaveBeenCalledWith(
+      '%9',
+      "claude --resume '12345678-1234-1234-1234-123456789abc'"
+    );
+    expect(tmuxServiceMock.sendTmuxKeys).toHaveBeenCalledWith('%9', 'Enter');
+  });
+
+  it('relaunches a dmux-owned shell command when restoring it', async () => {
+    const { recreateMissingPanes } = await import('../src/hooks/usePaneLoading.js');
+    const cwd = process.cwd();
+    const pane: DmuxPane = {
+      id: 'dmux-3',
+      slug: 'files-feature',
+      prompt: '',
+      paneId: '%4',
+      type: 'shell',
+      shellType: 'fb',
+      shellCwd: cwd,
+      shellCommand: 'dmux --files-only',
+      browserPath: cwd,
+    };
+
+    await recreateMissingPanes([pane], `${cwd}/.dmux/dmux.config.json`);
+
+    expect(splitPaneMock).toHaveBeenCalledWith({
+      cwd,
+      command: 'dmux --files-only',
+    });
+  });
 });

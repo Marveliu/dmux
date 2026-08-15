@@ -17,6 +17,7 @@ import {
 import type {
   DmuxPane,
   DmuxThemeName,
+  InferenceTarget,
   NewPaneInput,
   ProjectSettings,
   SettingDefinition,
@@ -828,6 +829,14 @@ export class PopupManager {
           return pendingUpdates.length > 0 ? { updates: pendingUpdates } : null
         }
 
+        if (data.action === "inferenceProviders") {
+          const inferenceUpdates = await this.launchInferenceSetupPopup(resolvedProjectRoot)
+          if (inferenceUpdates) {
+            pendingUpdates.push(...inferenceUpdates)
+          }
+          return pendingUpdates.length > 0 ? { updates: pendingUpdates } : null
+        }
+
         if (
           typeof data.key === "string"
           && (
@@ -954,6 +963,44 @@ export class PopupManager {
       }
     } catch (error: any) {
       this.showTempMessage(`Failed to launch popup: ${error.message}`)
+      return null
+    }
+  }
+
+  async launchInferenceSetupPopup(
+    projectRoot?: string
+  ): Promise<Array<{
+    key: "inferencePrimary" | "inferenceBackup";
+    value: InferenceTarget | null;
+    scope: "global";
+  }> | null> {
+    if (!this.checkPopupSupport()) return null
+
+    try {
+      const result = await this.launchPopup<{
+        primary: InferenceTarget;
+        backup: InferenceTarget | null;
+      }>(
+        "inferenceSetupPopup.js",
+        [],
+        {
+          width: 90,
+          height: 22,
+          title: "Inference Providers",
+          positioning: "centered",
+        },
+        undefined,
+        projectRoot
+      )
+
+      const data = this.handleResult(result)
+      if (!data) return null
+      return [
+        { key: "inferencePrimary", value: data.primary, scope: "global" },
+        { key: "inferenceBackup", value: data.backup, scope: "global" },
+      ]
+    } catch (error: any) {
+      this.showTempMessage(`Inference setup failed: ${error.message}`)
       return null
     }
   }

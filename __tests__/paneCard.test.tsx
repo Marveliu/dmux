@@ -34,6 +34,22 @@ describe('PaneCard', () => {
     expect(stripAnsi(lastFrame() ?? '')).toContain('[zs]');
   });
 
+  it('renders the currently detected agent for a regular terminal', () => {
+    const pane = createWorktreePane({
+      type: 'shell',
+      shellType: 'zsh',
+      agent: 'claude',
+      activeAgent: 'claude',
+    });
+
+    const { lastFrame } = render(
+      <PaneCard pane={pane} isDevSource={false} selected={false} />
+    );
+
+    expect(stripAnsi(lastFrame() ?? '')).toContain('[cc]');
+    expect(stripAnsi(lastFrame() ?? '')).not.toContain('[zs]');
+  });
+
   it('renders file browser panes using the fb tag', () => {
     const pane = createWorktreePane({
       type: 'shell',

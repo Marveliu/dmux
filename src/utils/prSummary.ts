@@ -3,7 +3,7 @@
  */
 
 import { execSync } from 'child_process';
-import { callOpenRouter } from './aiMerge.js';
+import { callInference } from './aiMerge.js';
 import { LogService } from '../services/LogService.js';
 
 export interface PRSummary {
@@ -114,7 +114,7 @@ Respond with strict JSON: {"title": string, "body": string}.
 Output JSON only, no prose, no code fences.`;
 
 /**
- * Generate a PR summary using the existing OpenRouter LLM. Returns null on failure.
+ * Generate a PR summary using the configured inference stack. Returns null on failure.
  */
 export async function generatePRSummary(
   repoPath: string,
@@ -146,7 +146,7 @@ Return JSON with {"title","body"} describing this pull request.`;
 
   const prompt = `${PR_SYSTEM_PROMPT}\n\n${userPrompt}`;
 
-  const raw = await callOpenRouter(prompt, 900, timeoutMs);
+  const raw = await callInference(prompt, 900, timeoutMs);
   if (!raw) return null;
 
   const parsed = extractJson(raw);

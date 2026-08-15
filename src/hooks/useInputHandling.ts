@@ -251,6 +251,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       )
       shellPane.projectRoot = targetProjectRoot
       shellPane.projectName = path.basename(targetProjectRoot)
+      shellPane.shellCwd = targetProjectRoot
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
       await savePanes([...panes, shellPane])
 
@@ -312,6 +313,7 @@ export function useInputHandling(params: UseInputHandlingParams) {
       )
       shellPane.projectRoot = targetProjectRoot
       shellPane.projectName = path.basename(targetProjectRoot)
+      shellPane.shellCwd = selectedPane.worktreePath
       shellPane.colorTheme = resolveProjectColorTheme(targetProjectRoot, sidebarProjects)
       await savePanes([...panes, shellPane])
 
@@ -384,6 +386,8 @@ export function useInputHandling(params: UseInputHandlingParams) {
         colorTheme: resolveProjectColorTheme(targetProjectRoot, sidebarProjects),
         type: "shell",
         shellType: "fb",
+        shellCwd: selectedPane.worktreePath,
+        shellCommand: buildFilesOnlyCommand(projectRoot),
         browserPath: selectedPane.worktreePath,
       }
 

@@ -19,6 +19,7 @@ import { SIDEBAR_WIDTH } from '../../utils/layoutManager.js';
 import { resolveEnabledAgentsSelection } from '../../utils/agentLaunch.js';
 import { resolveNotificationSoundsSelection } from '../../utils/notificationSounds.js';
 import { SIDEBAR_PROJECT_COLOR_THEME_SETTING_KEY } from '../../utils/sidebarProjects.js';
+import { describeInferenceTarget } from '../../utils/inferenceProviders.js';
 import { POPUP_CONFIG } from './config.js';
 import {
   PopupWrapper,
@@ -378,6 +379,10 @@ const SettingsPopupApp: React.FC<SettingsPopupProps> = ({
 
     if (key === 'enabledNotificationSounds') {
       return `${resolveNotificationSoundsSelection(currentSettings.enabledNotificationSounds).length} selected`;
+    }
+
+    if (key === 'inferenceProviders') {
+      return describeInferenceTarget(currentSettings.inferencePrimary);
     }
 
     return null;

@@ -52,6 +52,7 @@ describe('renameAction', () => {
         id: pane.id,
         slug: 'test-pane',
         displayName: 'QA Review',
+        displayNameSource: 'human',
       }),
     ]);
     expect(onPaneUpdate).toHaveBeenCalledWith(
@@ -59,6 +60,7 @@ describe('renameAction', () => {
         id: pane.id,
         slug: 'test-pane',
         displayName: 'QA Review',
+        displayNameSource: 'human',
       })
     );
   });
@@ -82,6 +84,31 @@ describe('renameAction', () => {
         id: pane.id,
         slug: 'test-pane',
         displayName: undefined,
+        displayNameSource: undefined,
+      }),
+    ]);
+  });
+
+  it('designates an unchanged automatic terminal name as human-authored', async () => {
+    const pane = createMockPane({
+      type: 'shell',
+      slug: 'shell-1',
+      displayName: 'Run Unit Tests',
+      displayNameSource: 'auto',
+      worktreePath: undefined,
+    });
+    const savePanes = vi.fn(async () => {});
+    const context = createMockContext([pane], { savePanes });
+
+    const result = await renamePane(pane, context);
+    const submitResult = await result.onSubmit?.('Run Unit Tests');
+
+    expect(submitResult).toBeDefined();
+    expectSuccess(submitResult!, 'Renamed pane');
+    expect(savePanes).toHaveBeenCalledWith([
+      expect.objectContaining({
+        displayName: 'Run Unit Tests',
+        displayNameSource: 'human',
       }),
     ]);
   });

@@ -1,7 +1,10 @@
 import { EventEmitter } from 'events';
 import type { DmuxPane, AgentStatus, OptionChoice, PotentialHarm } from '../types.js';
 import { WorkerMessageBus } from './WorkerMessageBus.js';
-import { PaneWorkerManager } from './PaneWorkerManager.js';
+import {
+  PaneWorkerManager,
+  shouldMonitorPaneForStatusTracking,
+} from './PaneWorkerManager.js';
 import { PaneAnalyzer } from './PaneAnalyzer.js';
 import type { PaneAnalysis } from './PaneAnalyzer.js';
 import type { OutboundMessage } from '../workers/WorkerMessages.js';
@@ -117,6 +120,16 @@ export class StatusDetector extends EventEmitter {
 
     // Update workers based on current panes
     await this.workerManager.updateWorkers(panes);
+
+    const monitoredPaneIds = new Set(
+      panes.filter(shouldMonitorPaneForStatusTracking).map((pane) => pane.id)
+    );
+    for (const paneId of this.paneStatuses.keys()) {
+      if (!monitoredPaneIds.has(paneId)) {
+        this.paneStatuses.delete(paneId);
+        this.cancelLLMRequest(paneId, LLM_ABORT_REASON_SUPERSEDED);
+      }
+    }
   }
 
   /**
@@ -355,15 +368,15 @@ export class StatusDetector extends EventEmitter {
       if (error.message) {
         // Clean up common API error patterns
         if (error.message.includes('API error')) {
-          // Extract model name and status from API errors
+          // Extract model name and status from provider API errors
           const match = error.message.match(/API error \(([^)]+)\): (\d+)/);
           if (match) {
             const [, model, status] = match;
             // Provide helpful messages for common status codes
             if (status === '401') {
-              errorMessage = `API auth failed - check OPENROUTER_API_KEY`;
+              errorMessage = `Inference authentication failed - check the provider key`;
             } else if (status === '402') {
-              errorMessage = `Insufficient credits - add credits to OpenRouter account`;
+              errorMessage = `Inference provider credits are exhausted`;
             } else if (status === '429') {
               errorMessage = `Rate limited - wait before retrying`;
             } else if (status === '503') {
@@ -374,10 +387,10 @@ export class StatusDetector extends EventEmitter {
           } else {
             errorMessage = error.message;
           }
-        } else if (error.message.includes('API key')) {
-          errorMessage = 'Set OPENROUTER_API_KEY env var';
-        } else if (error.message.includes('All models')) {
-          errorMessage = 'All models failed - check API key & credits';
+        } else if (error.message.includes('API key') || error.message.includes('Missing ')) {
+          errorMessage = 'Configure an inference provider key in settings';
+        } else if (error.message.includes('All inference targets')) {
+          errorMessage = 'Primary and backup inference targets failed';
         } else if (error.message.includes('fetch')) {
           errorMessage = 'Network error - check connection';
         } else {

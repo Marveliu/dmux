@@ -42,6 +42,8 @@ const en: Translations = {
     enabledAgentsDescription: 'Select which agents appear in the new pane selection list',
     notificationSounds: 'Attention Notification Sounds',
     notificationSoundsDescription: 'Select the macOS helper sounds that dmux randomizes between for background alerts',
+    inferenceProviders: 'Inference Providers',
+    inferenceProvidersDescription: 'Choose primary and optional backup providers and models',
     showFooterTips: 'Show Footer Tips',
     showFooterTipsDescription: 'Rotate short dmux tips in the footer. Disable this if you prefer a quieter sidebar.',
     colorTheme: 'Color Theme',

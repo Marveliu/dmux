@@ -22,9 +22,13 @@ interface WorkerInfo {
 }
 
 export function shouldMonitorPaneForStatusTracking(
-  pane: Pick<DmuxPane, 'type' | 'agent'>
+  pane: Pick<DmuxPane, 'type' | 'agent' | 'activeAgent'>
 ): boolean {
-  return pane.type !== 'shell' && Boolean(pane.agent);
+  return Boolean(pane.activeAgent || (pane.type !== 'shell' && pane.agent));
+}
+
+function getMonitoredAgent(pane: DmuxPane): DmuxPane['agent'] {
+  return pane.activeAgent || pane.agent;
 }
 
 /**
@@ -54,7 +58,7 @@ export class PaneWorkerManager {
       const config: WorkerConfig = {
         paneId: pane.id,
         tmuxPaneId: pane.paneId,
-        agent: pane.agent,
+        agent: getMonitoredAgent(pane),
         worktreePath: pane.worktreePath,
         pollInterval: 1000 // 1 second polling
       };
@@ -68,7 +72,7 @@ export class PaneWorkerManager {
         paneId: pane.id,
         tmuxPaneId: pane.paneId,
         paneType: pane.type,
-        agent: pane.agent,
+        agent: getMonitoredAgent(pane),
         startTime: Date.now(),
         restartCount: 0
       };
@@ -224,8 +228,11 @@ export class PaneWorkerManager {
       } else {
         // Check if tmux pane ID changed
         const workerInfo = this.workers.get(pane.id)!;
-        if (workerInfo.tmuxPaneId !== pane.paneId) {
-          // Pane ID changed, recreate worker
+        if (
+          workerInfo.tmuxPaneId !== pane.paneId
+          || workerInfo.agent !== getMonitoredAgent(pane)
+        ) {
+          // Pane ID or detected agent changed, recreate worker.
           await this.destroyWorker(pane.id);
           this.createWorker(pane);
         }

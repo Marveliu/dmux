@@ -42,6 +42,8 @@ const ja: Translations = {
     enabledAgentsDescription: '新しいペインの選択リストに表示するエージェントを選択してください',
     notificationSounds: '通知音',
     notificationSoundsDescription: 'バックグラウンドアラート用にdmuxがランダムに選択するmacOSヘルパーのサウンドを選択してください',
+    inferenceProviders: '推論プロバイダー',
+    inferenceProvidersDescription: 'プライマリと任意のバックアップのプロバイダーおよびモデルを選択します',
     showFooterTips: 'フッターヒントを表示',
     showFooterTipsDescription: 'フッターに短いdmuxのヒントをローテーション表示します。静かなサイドバーを好む場合は無効にしてください。',
     colorTheme: 'カラーテーマ',

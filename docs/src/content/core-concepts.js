@@ -32,6 +32,10 @@ export function render() {
       <li><strong>Cleanup</strong> — worktree and branch are removed after merge</li>
     </ol>
 
+    <h3>Regular Terminals</h3>
+    <p>Terminal panes created with <kbd>t</kbd> are durable session entries. dmux records each terminal's current working directory and recreates it there if the tmux pane or the whole dmux session needs to be restored. It also detects supported agents launched manually inside any pane, follows agent switches, and resumes the active conversation after a restore (using an exact session ID for Claude and Codex when available).</p>
+    <p>With an inference provider configured, dmux periodically samples settled terminal output and gives the pane a short task-oriented name. New work can refresh an automatic name after a cooldown. A name entered with <strong>Rename</strong> is considered human-authored and will never be replaced; clear it to allow automatic naming again.</p>
+
     <h3>Pane Status Detection</h3>
     <p>dmux monitors each pane to detect the agent's state:</p>
     <table>

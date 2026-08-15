@@ -8,10 +8,12 @@ export function render() {
     <h2>Install dmux</h2>
     <pre><code data-lang="bash">npm -g i dmux</code></pre>
 
-    <h2>Set Up OpenRouter (Recommended)</h2>
-    <p>Before your first run, we recommend setting up an <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> API key. dmux uses it to generate smart branch names from your prompts and AI-powered commit messages when merging. Without it, branch names fall back to <code>dmux-{timestamp}</code> and commit messages will be generic.</p>
-    <pre><code data-lang="bash">export OPENROUTER_API_KEY="sk-or-..."</code></pre>
-    <p>Add this to your shell profile (<code>~/.zshrc</code> or <code>~/.bashrc</code>) so it persists across sessions. See <a href="#configuration">Configuration</a> for model options and details.</p>
+    <h2>Choose an Inference Provider (Recommended)</h2>
+    <p>On first run, dmux can configure the model used for smart branch names, terminal names, commit messages, summaries, and pane-state analysis. Search the provider list, choose a provider, then choose from the provider's live model catalog.</p>
+    <p>You can use an API key from OpenRouter, OpenAI, Anthropic, Google, Cerebras, Groq, and other supported providers. You can also choose <strong>ChatGPT subscription</strong> or <strong>Grok Build subscription</strong>; dmux reuses the corresponding Codex or Grok Build CLI login and included plan usage instead of asking for an API key.</p>
+    <pre><code data-lang="bash"># Optional: sign in before starting dmux
+codex login</code></pre>
+    <p>The same setup is available later under <kbd>s</kbd> → <strong>Inference Providers</strong>, including an optional backup provider/model.</p>
 
     <h2>First Run</h2>
     <ol>

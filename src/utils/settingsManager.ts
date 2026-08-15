@@ -30,6 +30,7 @@ import {
   DMUX_THEME_NAMES,
   isDmuxThemeName,
 } from '../theme/themePalette.js';
+import { isValidInferenceTarget } from './inferenceProviders.js';
 
 const GLOBAL_SETTINGS_PATH = join(homedir(), '.dmux.global.json');
 const TEAM_DEFAULTS_FILENAME = '.dmux.defaults.json';
@@ -144,6 +145,16 @@ function sanitizeLoadedSettings(value: unknown): DmuxSettings {
     sanitized.maxPaneWidth = parsed.maxPaneWidth;
   }
 
+  if (isValidInferenceTarget(parsed.inferencePrimary)) {
+    sanitized.inferencePrimary = { ...parsed.inferencePrimary };
+  }
+
+  if (parsed.inferenceBackup === null) {
+    sanitized.inferenceBackup = null;
+  } else if (isValidInferenceTarget(parsed.inferenceBackup)) {
+    sanitized.inferenceBackup = { ...parsed.inferenceBackup };
+  }
+
   return sanitized;
 }
 
@@ -156,6 +167,13 @@ function cloneSettingsArrays(settings: DmuxSettings): DmuxSettings {
 
   if (Array.isArray(cloned.enabledNotificationSounds)) {
     cloned.enabledNotificationSounds = [...cloned.enabledNotificationSounds];
+  }
+
+  if (cloned.inferencePrimary) {
+    cloned.inferencePrimary = { ...cloned.inferencePrimary };
+  }
+  if (cloned.inferenceBackup) {
+    cloned.inferenceBackup = { ...cloned.inferenceBackup };
   }
 
   return cloned;
@@ -234,6 +252,10 @@ const LOCALIZED_SETTING_TRANSLATIONS: Partial<
   enabledNotificationSounds: {
     label: 'settings.notificationSounds',
     description: 'settings.notificationSoundsDescription',
+  },
+  inferenceProviders: {
+    label: 'settings.inferenceProviders',
+    description: 'settings.inferenceProvidersDescription',
   },
   showFooterTips: {
     label: 'settings.showFooterTips',
@@ -337,6 +359,12 @@ export const SETTING_DEFINITIONS: SettingDefinition[] = [
     key: 'enabledNotificationSounds' as any,
     label: 'Attention Notification Sounds',
     description: 'Select the macOS helper sounds that dmux randomizes between for background alerts',
+    type: 'action' as any,
+  },
+  {
+    key: 'inferenceProviders' as any,
+    label: 'Inference Providers',
+    description: 'Choose primary and optional backup providers and models',
     type: 'action' as any,
   },
   {
@@ -598,6 +626,17 @@ export class SettingsManager {
         throw new Error(`Invalid enabledNotificationSounds: ${invalidSoundIds.join(', ')}`);
       }
     }
+    if (key === 'inferencePrimary' && !isValidInferenceTarget(value)) {
+      throw new Error('Invalid inferencePrimary provider/model selection');
+    }
+    if (
+      key === 'inferenceBackup'
+      && value !== null
+      && value !== undefined
+      && !isValidInferenceTarget(value)
+    ) {
+      throw new Error('Invalid inferenceBackup provider/model selection');
+    }
     if (key === 'minPaneWidth' && !isValidMinPaneWidth(value)) {
       throw new Error(
         `Invalid minPaneWidth: expected an integer between ${MIN_MIN_PANE_WIDTH} and ${MAX_MIN_PANE_WIDTH}`
@@ -682,6 +721,16 @@ export class SettingsManager {
         throw new Error(`Invalid enabledNotificationSounds: ${invalidSoundIds.join(', ')}`);
       }
       settings.enabledNotificationSounds = settings.enabledNotificationSounds as NotificationSoundId[];
+    }
+    if (settings.inferencePrimary !== undefined && !isValidInferenceTarget(settings.inferencePrimary)) {
+      throw new Error('Invalid inferencePrimary provider/model selection');
+    }
+    if (
+      settings.inferenceBackup !== undefined
+      && settings.inferenceBackup !== null
+      && !isValidInferenceTarget(settings.inferenceBackup)
+    ) {
+      throw new Error('Invalid inferenceBackup provider/model selection');
     }
     if (typeof settings.baseBranch === 'string' && settings.baseBranch !== '' && !isValidBranchName(settings.baseBranch)) {
       throw new Error('Invalid baseBranch: contains characters not allowed in git branch names');

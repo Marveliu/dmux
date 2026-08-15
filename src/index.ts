@@ -188,7 +188,7 @@ class Dmux {
     // Check for migration from old config location
     await this.migrateOldConfig();
 
-    // First-run onboarding (tmux config + OpenRouter API key)
+    // First-run onboarding (tmux config + inference provider/model)
     await runFirstRunOnboardingIfNeeded();
 
     // Initialize config file if it doesn't exist

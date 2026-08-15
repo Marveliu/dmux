@@ -37,7 +37,9 @@ export async function renamePane(
     title: 'Rename Pane',
     message: [
       `Rename "${currentName}".`,
-      'Leave blank to use the worktree name again.',
+      pane.type === 'shell'
+        ? 'Leave blank to allow automatic naming again.'
+        : 'Leave blank to use the worktree name again.',
     ].join('\n\n'),
     placeholder: pane.slug,
     defaultValue: pane.displayName || currentName,
@@ -56,8 +58,12 @@ export async function renamePane(
         ? normalizedName
         : undefined;
       const currentDisplayName = sanitizePaneDisplayName(pane.displayName || '') || undefined;
+      const nextDisplayNameSource = nextDisplayName ? 'human' as const : undefined;
 
-      if (currentDisplayName === nextDisplayName) {
+      if (
+        currentDisplayName === nextDisplayName
+        && pane.displayNameSource === nextDisplayNameSource
+      ) {
         return {
           type: 'info',
           message: `Pane name unchanged: "${currentName}"`,
@@ -69,6 +75,11 @@ export async function renamePane(
         const updatedPane: DmuxPane = {
           ...pane,
           displayName: nextDisplayName,
+          displayNameSource: nextDisplayNameSource,
+          lastAutoNamedAt: nextDisplayName ? pane.lastAutoNamedAt : undefined,
+          lastAutoNameFingerprint: nextDisplayName
+            ? pane.lastAutoNameFingerprint
+            : undefined,
         };
         const updatedPanes = context.panes.map((candidate) =>
           candidate.id === pane.id ? updatedPane : candidate

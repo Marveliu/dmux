@@ -83,6 +83,15 @@ export function render() {
       </tbody>
     </table>
 
+    <h3><code>inferencePrimary</code> / <code>inferenceBackup</code></h3>
+    <table>
+      <tbody>
+        <tr><td><strong>Type</strong></td><td><code>{ providerId, modelId, ...customConnectionFields } | null</code></td></tr>
+        <tr><td><strong>Default</strong></td><td>Not configured; <code>inferenceBackup</code> is optional</td></tr>
+        <tr><td><strong>Description</strong></td><td>The provider/model pair used for dmux inference and its optional failover. Use the Inference Providers settings flow so model IDs come from the provider catalog. Credentials are not stored in these objects.</td></tr>
+      </tbody>
+    </table>
+
     <h3><code>useTmuxHooks</code></h3>
     <table>
       <tbody>
@@ -140,7 +149,7 @@ export function render() {
     <h2>Accessing Settings</h2>
 
     <h3>TUI</h3>
-    <p>Press <kbd>s</kbd> to open the settings dialog. You can switch between global and project scope, toggle each setting, choose enabled agents, and configure macOS attention notification sounds.</p>
+    <p>Press <kbd>s</kbd> to open the settings dialog. You can switch between global and project scope, toggle each setting, choose enabled agents, configure inference providers, and configure macOS attention notification sounds.</p>
 
     <h3>Manual Editing</h3>
     <p>You can edit the JSON files directly:</p>
@@ -152,6 +161,8 @@ export function render() {
   "defaultAgent": "claude",
   "enabledAgents": ["claude", "codex", "grok", "gemini"],
   "enabledNotificationSounds": ["default-system-sound", "harp"],
+  "inferencePrimary": { "providerId": "cerebras", "modelId": "provider-model-id" },
+  "inferenceBackup": { "providerId": "openrouter", "modelId": "provider/model-id" },
   "useTmuxHooks": false,
   "baseBranch": "develop",
   "branchPrefix": "feat/",
@@ -179,21 +190,24 @@ export function render() {
       <li>Built-in defaults — if neither file defines the setting</li>
     </ol>
 
-    <h2>OpenRouter Configuration</h2>
-    <p>dmux uses <a href="https://openrouter.ai" target="_blank" rel="noopener">OpenRouter</a> for AI-powered features like smart branch naming and commit message generation.</p>
+    <h2>Inference Providers</h2>
+    <p>dmux uses one shared inference configuration for smart branch names, automatic terminal names, commit messages, PR summaries, conflict assistance, and pane-state analysis. Press <kbd>s</kbd>, open <strong>Inference Providers</strong>, and search for a provider.</p>
 
-    <h3>Setting Up</h3>
+    <h3>Provider and Model Selection</h3>
     <ol>
-      <li>Create an account at <a href="https://openrouter.ai" target="_blank" rel="noopener">openrouter.ai</a></li>
-      <li>Generate an API key from the <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">keys page</a></li>
-      <li>Set the environment variable:
-        <pre><code data-lang="bash">export OPENROUTER_API_KEY="sk-or-v1-..."</code></pre>
-      </li>
-      <li>Add it to your shell profile for persistence:
-        <pre><code data-lang="bash"># Add to ~/.zshrc or ~/.bashrc
-echo 'export OPENROUTER_API_KEY="sk-or-v1-..."' >> ~/.zshrc</code></pre>
-      </li>
+      <li>Choose a primary provider. dmux detects its standard environment key if one is already set.</li>
+      <li>If the key is missing, enter it once. dmux adds a managed export to your shell profile and stores a private <code>0600</code> copy under <code>~/.dmux/</code> so the current process can use it immediately.</li>
+      <li>Search and select a model. dmux loads the current catalog from the provider's <code>/models</code> endpoint whenever that endpoint is available.</li>
+      <li>Optionally repeat the flow for a backup provider/model. Requests only move to the backup after the primary fails.</li>
     </ol>
+    <p>Built-in choices include ChatGPT subscription, Grok Build subscription, OpenRouter, OpenAI, Anthropic, Google Gemini, xAI, Groq, Cerebras, DeepSeek, Mistral, Together, Fireworks, Perplexity, Cohere, Vercel AI Gateway, and Hugging Face. Choose <strong>Custom OpenAI-compatible</strong> for another service; provide its base URL and environment variable name. If a service does not expose a model catalog, dmux lets you enter a model ID manually.</p>
+
+    <h3>ChatGPT Subscription</h3>
+    <p>Choose <strong>ChatGPT subscription</strong> to use a Codex/ChatGPT plan instead of usage-based API billing. dmux invokes the installed Codex CLI's supported login flow, leaves credential storage and token refresh to Codex, and reads the available model catalog from Codex app-server.</p>
+    <p>Choose <strong>Grok Build subscription</strong> to use a SpaceXAI plan instead of the usage-billed xAI API provider. dmux invokes the installed Grok Build CLI's OAuth flow, leaves credential storage and refresh to that CLI, and reads its current model catalog from <code>grok models</code>.</p>
+    <pre><code data-lang="bash">codex login
+codex login status</code></pre>
+    <p>ChatGPT inference requires the Codex CLI. An OpenAI Platform API key is a separate provider choice and uses <code>OPENAI_API_KEY</code>.</p>
 
     <h3>How It's Used</h3>
     <table>
@@ -201,23 +215,25 @@ echo 'export OPENROUTER_API_KEY="sk-or-v1-..."' >> ~/.zshrc</code></pre>
         <tr><th>Feature</th><th>Model</th><th>Purpose</th></tr>
       </thead>
       <tbody>
-        <tr><td>Slug generation</td><td>gpt-4o-mini</td><td>Convert prompts to short branch names</td></tr>
-        <tr><td>Commit messages</td><td>gpt-4o-mini</td><td>Generate conventional commit messages from diffs</td></tr>
-        <tr><td>Pane status</td><td>Gemini Flash / GPT-4o mini, with a free JSON-capable fallback</td><td>Detect agent state from terminal output</td></tr>
+        <tr><td>Slug generation</td><td rowspan="4">Selected primary, then optional backup</td><td>Convert prompts to short branch names</td></tr>
+        <tr><td>Commit messages and summaries</td><td>Describe git changes concisely</td></tr>
+        <tr><td>Terminal names</td><td>Name settled regular terminals from recent screen output</td></tr>
+        <tr><td>Pane status</td><td>Detect agent state from terminal output</td></tr>
       </tbody>
     </table>
 
-    <h3>Without OpenRouter</h3>
-    <p>If <code>OPENROUTER_API_KEY</code> is not set, dmux still works but with reduced functionality:</p>
+    <h3>Without an Inference Provider</h3>
+    <p>dmux still works without inference configured, with reduced automation:</p>
     <ul>
       <li>Branch names fall back to <code>dmux-{timestamp}</code></li>
       <li>Commit messages fall back to <code>dmux: auto-commit changes</code></li>
+      <li>Regular terminals keep their stable <code>shell-N</code> names unless you rename them</li>
       <li>Pane status detection uses heuristics instead of LLM analysis</li>
     </ul>
 
     <div class="callout callout-tip">
       <div class="callout-title">Tip</div>
-      OpenRouter provides free credits for new accounts, and the paid models dmux prefers for AI features are very inexpensive. Pane status detection also has a zero-cost fallback for capped or unavailable paid models.
+      Provider and model IDs are saved in dmux settings, but API keys are never written to project settings. Team defaults can name a provider/model while each developer supplies their own corresponding environment key.
     </div>
 
     <h2>Environment Variables</h2>
@@ -226,7 +242,21 @@ echo 'export OPENROUTER_API_KEY="sk-or-v1-..."' >> ~/.zshrc</code></pre>
         <tr><th>Variable</th><th>Description</th></tr>
       </thead>
       <tbody>
-        <tr><td><code>OPENROUTER_API_KEY</code></td><td>API key for OpenRouter AI features</td></tr>
+        <tr><td><code>OPENROUTER_API_KEY</code></td><td>OpenRouter</td></tr>
+        <tr><td><code>OPENAI_API_KEY</code></td><td>OpenAI Platform API</td></tr>
+        <tr><td><code>ANTHROPIC_API_KEY</code></td><td>Anthropic</td></tr>
+        <tr><td><code>GOOGLE_GENERATIVE_AI_API_KEY</code></td><td>Google Gemini</td></tr>
+        <tr><td><code>MISTRAL_API_KEY</code></td><td>Mistral AI</td></tr>
+        <tr><td><code>TOGETHER_API_KEY</code></td><td>Together AI</td></tr>
+        <tr><td><code>FIREWORKS_API_KEY</code></td><td>Fireworks AI</td></tr>
+        <tr><td><code>PERPLEXITY_API_KEY</code></td><td>Perplexity</td></tr>
+        <tr><td><code>COHERE_API_KEY</code></td><td>Cohere</td></tr>
+        <tr><td><code>AI_GATEWAY_API_KEY</code></td><td>Vercel AI Gateway</td></tr>
+        <tr><td><code>HF_TOKEN</code></td><td>Hugging Face inference router</td></tr>
+        <tr><td><code>CEREBRAS_API_KEY</code></td><td>Cerebras Inference</td></tr>
+        <tr><td><code>GROQ_API_KEY</code></td><td>Groq</td></tr>
+        <tr><td><code>DEEPSEEK_API_KEY</code></td><td>DeepSeek</td></tr>
+        <tr><td><code>XAI_API_KEY</code></td><td>xAI</td></tr>
         <tr><td><code>DMUX_SESSION</code></td><td>Override the tmux session name</td></tr>
       </tbody>
     </table>

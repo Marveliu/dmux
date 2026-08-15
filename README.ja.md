@@ -78,7 +78,7 @@ dmuxは各タスクに対してtmuxペインを作成します。各ペインに
 - Node.js 18+
 - Git 2.20+
 - 少なくとも1つのサポート対象エージェントCLI（例：[Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[Codex](https://github.com/openai/codex)、[Grok Build](https://docs.x.ai/build/overview)、[OpenCode](https://github.com/opencode-ai/opencode)、[Cline CLI](https://docs.cline.bot/cline-cli/getting-started)、[Gemini CLI](https://github.com/google-gemini/gemini-cli)、[Qwen CLI](https://github.com/QwenLM/qwen-code)、[Amp CLI](https://ampcode.com/manual)、[pi CLI](https://www.npmjs.com/package/@mariozechner/pi-coding-agent)、[Cursor CLI](https://docs.cursor.com/en/cli/overview)、[Copilot CLI](https://github.com/github/copilot-cli)、[Crush CLI](https://github.com/charmbracelet/crush)）
-- [OpenRouter APIキー](https://openrouter.ai/)（オプション、AIブランチ名とコミットメッセージ用）
+- 推論プロバイダーのAPIキー、ChatGPTサブスクリプションでログイン済みのCodex CLI、またはSpaceXAIサブスクリプションでログイン済みのGrok Build CLI（オプション、AI命名・要約・ペイン分析用）
 
 ## ドキュメント
 

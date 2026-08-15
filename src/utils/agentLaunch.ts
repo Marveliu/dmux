@@ -63,6 +63,7 @@ export interface AgentRegistryEntry {
   permissionFlags: Partial<Record<Exclude<PermissionMode, ''>, string>>;
   defaultEnabled: boolean;
   resumeCommandTemplate?: string;
+  resumeSessionCommandTemplate?: string;
 }
 
 const HOME = process.env.HOME || '';
@@ -94,6 +95,7 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     },
     defaultEnabled: true,
     resumeCommandTemplate: 'claude --continue{permissions}',
+    resumeSessionCommandTemplate: 'claude --resume {sessionId}{permissions}',
   },
   opencode: {
     id: 'opencode',
@@ -136,6 +138,7 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     },
     defaultEnabled: true,
     resumeCommandTemplate: 'codex resume --last{permissions}',
+    resumeSessionCommandTemplate: 'codex resume {sessionId}{permissions}',
   },
   grok: {
     id: 'grok',
@@ -604,9 +607,13 @@ export function buildInitialPromptCommand(
 
 export function buildResumeCommand(
   agent: AgentName,
-  permissionMode: PermissionMode | undefined
+  permissionMode: PermissionMode | undefined,
+  sessionId?: string
 ): string | undefined {
-  const template = AGENT_REGISTRY[agent].resumeCommandTemplate;
+  const definition = AGENT_REGISTRY[agent];
+  const template = sessionId && definition.resumeSessionCommandTemplate
+    ? definition.resumeSessionCommandTemplate.replace('{sessionId}', shellQuote(sessionId))
+    : definition.resumeCommandTemplate;
   if (!template) return undefined;
 
   const permissionFlags = getPermissionFlags(agent, permissionMode);
@@ -621,9 +628,10 @@ export function buildResumeCommand(
 
 export function buildAgentResumeOrLaunchCommand(
   agent: AgentName,
-  permissionMode: PermissionMode | undefined
+  permissionMode: PermissionMode | undefined,
+  sessionId?: string
 ): string {
-  return buildResumeCommand(agent, permissionMode)
+  return buildResumeCommand(agent, permissionMode, sessionId)
     || buildAgentCommand(agent, permissionMode);
 }
 

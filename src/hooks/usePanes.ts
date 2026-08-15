@@ -8,7 +8,7 @@ import { PANE_POLLING_INTERVAL } from '../constants/timing.js';
 import {
   loadAndProcessPanes,
   loadSidebarProjectsFromFile,
-  recreateKilledWorktreePanes,
+  recreateKilledPanes,
   fetchTmuxPaneIds,
 } from './usePaneLoading.js';
 import {
@@ -16,7 +16,6 @@ import {
   savePanesToFile,
   rebindAndFilterPanes,
   saveUpdatedPaneConfig,
-  handleLastPaneRemoval,
   destroyWelcomePaneIfNeeded,
 } from './usePaneSync.js';
 import {
@@ -24,15 +23,19 @@ import {
 } from './useShellDetection.js';
 import { rebindPaneByTitle } from '../utils/paneRebinding.js';
 import { PaneEventService, type PaneEventMode } from '../services/PaneEventService.js';
-import { enforceControlPaneSize } from '../utils/tmux.js';
-import { SIDEBAR_WIDTH } from '../utils/layoutManager.js';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
 import { syncPaneColorThemes } from '../utils/paneColors.js';
+import { TerminalPaneNamingService } from '../services/TerminalPaneNamingService.js';
+import {
+  observePaneAgents,
+  syncPaneAgentMetadata,
+} from '../utils/paneAgentTracking.js';
 
 // Use p-queue for proper concurrency control instead of manual write lock
 // This prevents race conditions and provides better visibility into queue state
 const configQueue = new PQueue({ concurrency: 1 });
+const AGENT_TRACKING_INTERVAL_MS = 2000;
 
 async function withWriteLock<T>(operation: () => Promise<T>): Promise<T> {
   return configQueue.add(operation);
@@ -88,7 +91,12 @@ export default function usePanes(
         pendingLoad.current = false;
 
         // Load panes from file and rebind IDs based on tmux state
-        const { panes: loadedPanes, allPaneIds, titleToId } = await loadAndProcessPanes(
+        const {
+          panes: loadedPanes,
+          allPaneIds,
+          titleToId,
+          paneMetadataChanged,
+        } = await loadAndProcessPanes(
           panesFile,
           !initialLoadComplete.current
         );
@@ -101,21 +109,24 @@ export default function usePanes(
           sidebarProjectsRef.current = loadedSidebarProjects;
           setSidebarProjects(loadedSidebarProjects);
           initialLoadComplete.current = true;
+          if (paneMetadataChanged) {
+            await saveUpdatedPaneConfig(panesFile, loadedPanes, withWriteLock);
+          }
           break; // Exit loop after initial load — pending loads are handled by the next polling/event cycle
         }
 
-        // Rebind and filter panes (removes dead shell panes, keeps worktree panes)
-        const { activePanes, shellPanesRemoved, worktreePanesToRecreate } = rebindAndFilterPanes(
+        // Rebind panes and identify any durable panes that need recreation.
+        const { activePanes, panesToRecreate } = rebindAndFilterPanes(
           loadedPanes,
           titleToId,
           allPaneIds,
           !initialLoadComplete.current
         );
 
-        // Recreate worktree panes that were killed (e.g., via Ctrl+b x)
+        // Recreate durable panes that were killed outside dmux (e.g., via Ctrl+b x).
         let finalPanes = activePanes;
-        if (worktreePanesToRecreate.length > 0) {
-          finalPanes = await recreateKilledWorktreePanes(activePanes, allPaneIds, panesFile);
+        if (panesToRecreate.length > 0) {
+          finalPanes = await recreateKilledPanes(activePanes, allPaneIds, panesFile);
 
           // Re-fetch pane IDs after recreation
           const freshData = await fetchTmuxPaneIds();
@@ -162,7 +173,7 @@ export default function usePanes(
         if (
           currentPaneIds !== newPaneIds ||
           shellPanesAdded ||
-          shellPanesRemoved ||
+          paneMetadataChanged ||
           sidebarProjectsChanged
         ) {
           panesRef.current = finalPanes;
@@ -172,28 +183,9 @@ export default function usePanes(
             setSidebarProjects(nextSidebarProjects);
           }
 
-          // Save to file if IDs were remapped OR if shell panes were added/removed
-          if (idsChanged || shellPanesAdded || shellPanesRemoved) {
+          // Persist remapped IDs, newly detected terminals, and refreshed runtime metadata.
+          if (idsChanged || shellPanesAdded || paneMetadataChanged) {
             await saveUpdatedPaneConfig(panesFile, finalPanes, withWriteLock);
-
-            if (shellPanesRemoved) {
-              // If shell panes were removed and we now have 0 panes, recreate welcome pane.
-              if (finalPanes.length === 0) {
-                const sessionProjectRoot = path.dirname(path.dirname(panesFile));
-                await handleLastPaneRemoval(sessionProjectRoot);
-              } else if (controlPaneId) {
-                // Manual shell exits bypass closeAction's layout recalc path.
-                // Re-apply layout so adjacent panes are rebalanced.
-                try {
-                  await enforceControlPaneSize(controlPaneId, SIDEBAR_WIDTH);
-                } catch (error) {
-                  LogService.getInstance().debug(
-                    `Layout rebalance after shell close failed: ${error instanceof Error ? error.message : String(error)}`,
-                    'usePanes'
-                  );
-                }
-              }
-            }
           }
         }
       } while (pendingLoad.current);
@@ -275,6 +267,62 @@ export default function usePanes(
       return normalizedProjects;
     });
   };
+
+  // Regular terminals are named from settled screen captures. The service reads
+  // through panesRef so a late LLM response cannot overwrite newer pane state.
+  useEffect(() => {
+    if (skipLoading) return;
+
+    const namingService = new TerminalPaneNamingService({
+      getPanes: () => panesRef.current,
+      savePanes,
+    });
+    namingService.start();
+
+    return () => namingService.stop();
+  }, [panesFile, skipLoading]);
+
+  // Agent ownership is discovered from the live process tree, including agents
+  // launched manually from an ordinary terminal. Persist the active process and
+  // exact session ID (when exposed by the CLI) so a missing pane can resume it.
+  useEffect(() => {
+    if (skipLoading) return;
+
+    let stopped = false;
+    let running = false;
+    const syncAgents = async () => {
+      if (running || stopped || panesRef.current.length === 0) return;
+      running = true;
+      try {
+        const { observations } = await observePaneAgents(panesRef.current);
+        if (stopped || observations.size === 0) return;
+
+        // Use the newest pane state after async process inspection so an
+        // unrelated pane add/rename is never overwritten by this refresh.
+        const synced = syncPaneAgentMetadata(panesRef.current, observations);
+        if (!synced.changed) return;
+
+        panesRef.current = synced.panes;
+        setPanes(synced.panes);
+        await saveUpdatedPaneConfig(panesFile, synced.panes, withWriteLock);
+      } catch (error) {
+        LogService.getInstance().debug(
+          `Failed to sync pane agents: ${error instanceof Error ? error.message : String(error)}`,
+          'paneAgentTracking'
+        );
+      } finally {
+        running = false;
+      }
+    };
+
+    const initialTimer = setTimeout(() => void syncAgents(), 250);
+    const interval = setInterval(() => void syncAgents(), AGENT_TRACKING_INTERVAL_MS);
+    return () => {
+      stopped = true;
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [panesFile, skipLoading]);
 
   // Initialize PaneEventService when session info is available
   useEffect(() => {
