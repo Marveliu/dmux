@@ -23,7 +23,7 @@ interface UseActionSystemParams {
   projectName: string;
   defaultProjectRoot: string;
   onPaneUpdate?: (pane: DmuxPane) => void;
-  onPaneRemove?: (paneId: string) => void;
+  onPaneRemove?: (paneId: string) => void | Promise<void>;
   onActionResult?: (result: ActionResult) => Promise<void>;
   trackProjectActivity: TrackProjectActivity;
 
@@ -48,6 +48,20 @@ interface UseActionSystemParams {
       message: string,
       placeholder?: string,
       defaultValue?: string,
+      projectRoot?: string,
+      maxVisibleLines?: number
+    ) => Promise<string | null>;
+    launchPRReviewPopup?: (
+      data: {
+        title: string;
+        message: string;
+        defaultValue: string;
+        repoPath: string;
+        sourceBranch: string;
+        targetBranch: string;
+        files: string[];
+        aiFailed?: boolean;
+      },
       projectRoot?: string
     ) => Promise<string | null>;
     launchProgressPopup?: (
@@ -119,6 +133,33 @@ async function handleResultWithPopups(
       result.message,
       result.placeholder,
       result.defaultValue,
+      projectRoot,
+      result.inputMaxVisibleLines
+    );
+
+    if (inputValue !== null && result.onSubmit) {
+      const nextResult = await trackProjectActivity(
+        () => result.onSubmit!(inputValue),
+        projectRoot
+      );
+      await handleResultWithPopups(nextResult, popupLaunchers, projectRoot, trackProjectActivity);
+    }
+    return;
+  }
+
+  // Handle PR review dialogs (editable summary + changed files + diff peek)
+  if (result.type === 'pr_review' && popupLaunchers?.launchPRReviewPopup && result.reviewData) {
+    const inputValue = await popupLaunchers.launchPRReviewPopup(
+      {
+        title: result.title || 'Pull Request',
+        message: result.message || '',
+        defaultValue: result.defaultValue || '',
+        repoPath: result.reviewData.repoPath,
+        sourceBranch: result.reviewData.sourceBranch,
+        targetBranch: result.reviewData.targetBranch,
+        files: result.reviewData.files,
+        aiFailed: result.reviewData.aiFailed,
+      },
       projectRoot
     );
 

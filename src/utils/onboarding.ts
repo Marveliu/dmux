@@ -1,14 +1,14 @@
 import chalk from 'chalk';
 import os from 'os';
 import { createInterface } from 'node:readline/promises';
-import { Writable } from 'stream';
 import { LogService } from '../services/LogService.js';
 import { runTmuxConfigOnboardingIfNeeded } from './tmuxConfigOnboarding.js';
 import {
-  hasCompletedOpenRouterOnboarding,
-  persistOpenRouterApiKeyToShell,
-  writeOpenRouterOnboardingState,
+  hasCompletedInferenceProviderOnboarding,
+  writeInferenceProviderOnboardingState,
 } from './openRouterApiKeySetup.js';
+import { runInferenceSetup } from './inferenceSetup.js';
+import { SettingsManager } from './settingsManager.js';
 
 async function promptYesNo(question: string, defaultYes: boolean = true): Promise<boolean> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -29,37 +29,7 @@ async function promptYesNo(question: string, defaultYes: boolean = true): Promis
   }
 }
 
-async function promptHiddenInput(question: string): Promise<string> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    return '';
-  }
-
-  let muted = false;
-  const output = new Writable({
-    write(chunk, _encoding, callback) {
-      if (!muted) {
-        process.stdout.write(typeof chunk === 'string' ? chunk : chunk.toString());
-      }
-      callback();
-    },
-  });
-
-  const rl = createInterface({ input: process.stdin, output, terminal: true });
-  try {
-    muted = false;
-    const answerPromise = rl.question(`${question} `);
-    muted = true;
-    const answer = await answerPromise;
-    muted = false;
-    process.stdout.write('\n');
-    return answer.trim();
-  } finally {
-    muted = false;
-    rl.close();
-  }
-}
-
-export async function runOpenRouterApiKeyOnboardingIfNeeded(): Promise<void> {
+export async function runInferenceProviderOnboardingIfNeeded(): Promise<void> {
   const logger = LogService.getInstance();
 
   try {
@@ -68,67 +38,68 @@ export async function runOpenRouterApiKeyOnboardingIfNeeded(): Promise<void> {
       return;
     }
 
-    const existingApiKey = process.env.OPENROUTER_API_KEY?.trim();
-    if (existingApiKey) {
-      await writeOpenRouterOnboardingState(homeDir, 'existing-env');
+    const settingsManager = new SettingsManager(process.cwd());
+    if (settingsManager.getSettings().inferencePrimary) {
+      await writeInferenceProviderOnboardingState(homeDir, 'configured');
       return;
     }
 
-    const completed = await hasCompletedOpenRouterOnboarding(homeDir);
+    const completed = await hasCompletedInferenceProviderOnboarding(homeDir);
     if (completed) {
       return;
     }
 
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       logger.debug(
-        'Skipping OpenRouter API key onboarding because terminal is non-interactive',
+        'Skipping inference provider onboarding because terminal is non-interactive',
         'onboarding'
       );
       return;
     }
 
     const shouldConfigure = await promptYesNo(
-      'OPENROUTER_API_KEY is not set. Configure it now to enable AI-powered features?',
+      'Configure an inference provider for AI-powered dmux features?',
       true
     );
 
     if (!shouldConfigure) {
-      await writeOpenRouterOnboardingState(homeDir, 'skip');
+      await writeInferenceProviderOnboardingState(homeDir, 'skip');
       return;
     }
 
-    const apiKey = await promptHiddenInput('Enter your OpenRouter API key:');
-    if (!apiKey) {
-      console.log(chalk.yellow('Skipping OpenRouter setup (no API key entered).'));
-      await writeOpenRouterOnboardingState(homeDir, 'skip');
+    const configured = await runInferenceSetup();
+    if (!configured) {
+      console.log(chalk.yellow('Skipping inference setup.'));
+      await writeInferenceProviderOnboardingState(homeDir, 'skip');
       return;
     }
-
-    const { shellConfigPath } = await persistOpenRouterApiKeyToShell(apiKey, {
-      shellPath: process.env.SHELL,
-      homeDir,
-    });
-
-    process.env.OPENROUTER_API_KEY = apiKey;
-    await writeOpenRouterOnboardingState(homeDir, 'configured', shellConfigPath);
-
-    console.log(chalk.green(`Saved OPENROUTER_API_KEY to ${shellConfigPath}`));
-    console.log(chalk.yellow(`Run 'source ${shellConfigPath}' or open a new shell to load it globally.`));
+    settingsManager.updateSettings(
+      {
+        inferencePrimary: configured.primary,
+        inferenceBackup: configured.backup,
+      },
+      'global'
+    );
+    await writeInferenceProviderOnboardingState(homeDir, 'configured');
+    console.log(chalk.green('Saved inference provider settings.'));
   } catch (error) {
     logger.warn(
-      `OpenRouter onboarding failed: ${error instanceof Error ? error.message : String(error)}`,
+      `Inference provider onboarding failed: ${error instanceof Error ? error.message : String(error)}`,
       'onboarding'
     );
   }
 }
 
+/** @deprecated Kept for API compatibility with older integrations. */
+export const runOpenRouterApiKeyOnboardingIfNeeded = runInferenceProviderOnboardingIfNeeded;
+
 /**
  * Run all first-run onboarding checks in one place.
  * This currently includes:
  * - tmux config suggestion/setup
- * - OpenRouter API key setup
+ * - inference provider/model setup
  */
 export async function runFirstRunOnboardingIfNeeded(): Promise<void> {
   await runTmuxConfigOnboardingIfNeeded();
-  await runOpenRouterApiKeyOnboardingIfNeeded();
+  await runInferenceProviderOnboardingIfNeeded();
 }

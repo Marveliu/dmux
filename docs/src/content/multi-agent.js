@@ -13,6 +13,10 @@ export function render() {
 3. A/B: Claude Code + OpenCode</code></pre>
     <p>All available two-agent combinations are generated automatically based on which agents are installed.</p>
 
+    <h2>Multiple Runs Per Agent</h2>
+    <p>The agent chooser can launch up to three panes for each selected agent. It starts with your default agent (or the first available agent) at <code>1x</code>. Use <kbd>Space</kbd> to toggle an agent between <code>0x</code> and <code>1x</code>, and use the left/right arrows to decrease or increase the count. For example, selecting Codex <code>2x</code> and Grok Build <code>1x</code> creates three panes for the same prompt.</p>
+    <p>When an agent runs more than once, dmux appends a cardinal suffix to keep panes and branches distinct, such as <code>fix-auth-codex-1</code> and <code>fix-auth-codex-2</code>.</p>
+
     <h2>How It Works</h2>
     <ol>
       <li>Press <kbd>n</kbd> and enter your prompt</li>
@@ -37,6 +41,7 @@ export function render() {
         <tr><td>Claude Code</td><td><code>-claude-code</code></td></tr>
         <tr><td>opencode</td><td><code>-opencode</code></td></tr>
         <tr><td>Codex</td><td><code>-codex</code></td></tr>
+        <tr><td>Grok Build</td><td><code>-grok-build</code></td></tr>
       </tbody>
     </table>
 

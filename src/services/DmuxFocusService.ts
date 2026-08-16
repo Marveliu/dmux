@@ -114,6 +114,12 @@ const LSREGISTER_PATH = '/System/Library/Frameworks/CoreServices.framework/Versi
 const LEGACY_NOTIFIER_BASE_DIR = path.join(os.homedir(), '.dmux', 'macos-notifier');
 const LEGACY_NOTIFIER_APP_PATH = path.join(LEGACY_NOTIFIER_BASE_DIR, 'dmux-notifier.app');
 
+export function supportsRuntimeHelperSourceBuild(
+  packageRoot: string = resolvePackagePath(),
+): boolean {
+  return existsSync(path.join(packageRoot, 'src', 'services', 'DmuxFocusService.ts'));
+}
+
 function readTmuxGlobalEnvironment(name: string): string | undefined {
   if (!process.env.TMUX) {
     return undefined;
@@ -237,6 +243,15 @@ async function removeLegacyMacosNotifierArtifacts(): Promise<void> {
   }
 
   await fs.rm(LEGACY_NOTIFIER_BASE_DIR, { recursive: true, force: true });
+}
+
+async function removeHelperRuntimeArtifacts(
+  paths: ReturnType<typeof getHelperRuntimePaths>
+): Promise<void> {
+  await Promise.all([
+    fs.rm(paths.appPath, { recursive: true, force: true }),
+    fs.rm(paths.versionPath, { force: true }),
+  ]);
 }
 
 function shiftHexColor(hex: string, delta: number): string | null {
@@ -382,6 +397,16 @@ async function ensureHelperBundle(
     return { ready: false, rebuilt: false };
   }
 
+  const hasRuntimeBundle = existsSync(paths.executablePath) && existsSync(paths.infoPlistPath);
+  if (!supportsRuntimeHelperSourceBuild()) {
+    if (hasRuntimeBundle) {
+      return { ready: true, rebuilt: false };
+    }
+
+    await removeHelperRuntimeArtifacts(paths).catch(() => undefined);
+    return { ready: false, rebuilt: false };
+  }
+
   const bundledSoundAssets = getBundledNotificationSoundDefinitions().map((definition) => ({
     resourceFileName: definition.resourceFileName as string,
     sourcePath: path.join(paths.soundSourceDir, definition.resourceFileName as string),
@@ -423,49 +448,77 @@ async function ensureHelperBundle(
     return { ready: true, rebuilt: false };
   }
 
-  await fs.rm(paths.appPath, { recursive: true, force: true });
-  await fs.mkdir(path.dirname(paths.executablePath), { recursive: true });
-  await fs.mkdir(paths.resourcesPath, { recursive: true });
-  await fs.writeFile(paths.infoPlistPath, infoPlistTemplate, 'utf-8');
+  const helperBaseDir = path.dirname(paths.appPath);
+  await fs.mkdir(helperBaseDir, { recursive: true });
 
-  if (iconBuffer !== null) {
-    await fs.writeFile(paths.bundleIconPngPath, iconBuffer);
-    try {
-      await buildHelperBundleIcon(paths.bundleIconPngPath, paths.bundleIconIcnsPath);
-    } catch {
-      // The helper can still set the bundled PNG as its runtime icon.
+  const tempRoot = await fs.mkdtemp(path.join(helperBaseDir, 'build-'));
+  const tempAppPath = path.join(tempRoot, 'dmux-helper.app');
+  const tempContentsPath = path.join(tempAppPath, 'Contents');
+  const tempResourcesPath = path.join(tempContentsPath, 'Resources');
+  const tempExecutablePath = path.join(tempContentsPath, 'MacOS', 'dmux-helper');
+  const tempInfoPlistPath = path.join(tempContentsPath, 'Info.plist');
+  const tempBundleIconPngPath = path.join(tempResourcesPath, 'dmux-helper.png');
+  const tempBundleIconIcnsPath = path.join(tempResourcesPath, 'dmux-helper.icns');
+
+  try {
+    await fs.mkdir(path.dirname(tempExecutablePath), { recursive: true });
+    await fs.mkdir(tempResourcesPath, { recursive: true });
+    await fs.writeFile(tempInfoPlistPath, infoPlistTemplate, 'utf-8');
+
+    if (iconBuffer !== null) {
+      await fs.writeFile(tempBundleIconPngPath, iconBuffer);
+      try {
+        await buildHelperBundleIcon(tempBundleIconPngPath, tempBundleIconIcnsPath);
+      } catch {
+        // The helper can still set the bundled PNG as its runtime icon.
+      }
     }
+
+    await Promise.all(
+      soundAssets.map(async (asset) => {
+        await fs.writeFile(path.join(tempResourcesPath, asset.resourceFileName), asset.buffer);
+      })
+    );
+
+    const result = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
+      const child = spawn('swiftc', [
+        '-O',
+        paths.sourcePath,
+        '-o',
+        tempExecutablePath,
+        '-framework',
+        'AppKit',
+        '-framework',
+        'ApplicationServices',
+      ], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+
+      let stderr = '';
+      child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf-8'); });
+      child.on('close', (code) => { resolve({ status: code, stderr }); });
+      child.on('error', () => { resolve({ status: 1, stderr }); });
+    });
+
+    if (result.status !== 0) {
+      if (!hasRuntimeBundle) {
+        await removeHelperRuntimeArtifacts(paths).catch(() => undefined);
+      }
+      return { ready: false, rebuilt: false };
+    }
+
+    await fs.chmod(tempExecutablePath, 0o755).catch(() => undefined);
+    await fs.rm(paths.appPath, { recursive: true, force: true });
+    await fs.rename(tempAppPath, paths.appPath);
+    await fs.writeFile(paths.versionPath, expectedVersion, 'utf-8');
+
+    return {
+      ready: true,
+      rebuilt: true,
+    };
+  } finally {
+    await fs.rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
-
-  await Promise.all(
-    soundAssets.map(async (asset) => {
-      await fs.writeFile(path.join(paths.resourcesPath, asset.resourceFileName), asset.buffer);
-    })
-  );
-
-  const result = spawnSync('swiftc', [
-    '-O',
-    paths.sourcePath,
-    '-o',
-    paths.executablePath,
-    '-framework',
-    'AppKit',
-    '-framework',
-    'ApplicationServices',
-  ], {
-    stdio: 'pipe',
-    encoding: 'utf-8',
-  });
-
-  if (result.status !== 0) {
-    return { ready: false, rebuilt: false };
-  }
-
-  await fs.writeFile(paths.versionPath, expectedVersion, 'utf-8');
-  return {
-    ready: true,
-    rebuilt: true,
-  };
 }
 
 export function parseHelperSocketOwnerProcessIds(
@@ -643,6 +696,11 @@ export class DmuxFocusService extends EventEmitter {
     return selectedSound.resourceFileName;
   }
 
+  private areNotificationsEnabled(): boolean {
+    const settingsManager = new SettingsManager(this.options.projectRoot ?? process.cwd());
+    return settingsManager.getSettings().enableNotifications !== false;
+  }
+
   async start(): Promise<void> {
     if (!supportsNativeDmuxHelper() || !process.env.TMUX || isTestEnvironment()) {
       return;
@@ -792,7 +850,7 @@ export class DmuxFocusService extends EventEmitter {
 
     try {
       const [currentPaneId, currentWindowId, paneWindowId] = await Promise.all([
-        this.tmuxService.getCurrentPaneId(),
+        this.tmuxService.getActivePaneId(),
         this.tmuxService.getCurrentWindowId(),
         this.tmuxService.getPaneWindowId(tmuxPaneId),
       ]);
@@ -856,6 +914,10 @@ export class DmuxFocusService extends EventEmitter {
     request: DmuxAttentionNotificationRequest
   ): Promise<boolean> {
     if (!supportsNativeDmuxHelper() || isTestEnvironment()) {
+      return false;
+    }
+
+    if (!this.areNotificationsEnabled()) {
       return false;
     }
 
@@ -925,7 +987,7 @@ export class DmuxFocusService extends EventEmitter {
     }
 
     try {
-      const currentPaneId = await this.tmuxService.getCurrentPaneId();
+      const currentPaneId = await this.tmuxService.getActivePaneId();
       if (!currentPaneId) {
         this.setFullyFocusedPaneId(null);
         return;

@@ -3,7 +3,7 @@ export const meta = { title: 'Introduction' };
 export function render() {
   return `
     <h1>What is dmux?</h1>
-    <p class="lead">dmux runs multiple coding agents and shell panes in parallel using tmux and git worktrees. It automates the worktree lifecycle, supports multiple projects in one session, includes a built-in read-only file browser for each worktree, and can raise native macOS notifications when background panes need attention. If you provide an OpenRouter key, it will also generate branch names, commit messages, and other quality-of-life automation for you.</p>
+    <p class="lead">dmux runs multiple coding agents and shell panes in parallel using tmux and git worktrees. It automates the worktree lifecycle, restores regular terminals in their last working directories, supports multiple projects in one session, includes a built-in read-only file browser for each worktree, and can raise native macOS notifications when background panes need attention. Configure any supported inference provider—or a Codex/ChatGPT or Grok Build/SpaceXAI subscription login—to add branch names, terminal names, commit messages, summaries, and other quality-of-life automation.</p>
     <p>Use <kbd>f</kbd> to browse files inside a pane's worktree, <kbd>h</kbd> and <kbd>H</kbd> to hide panes without stopping them, and <kbd>P</kbd> to focus a single project's panes inside a shared session.</p>
 
     <div class="agent-cloud">
@@ -18,6 +18,10 @@ export function render() {
       <a href="#/agents" class="agent-cloud-item">
         <img src="/agents/codex.svg" alt="Codex" class="agent-cloud-logo" />
         <span>Codex</span>
+      </a>
+      <a href="#/agents" class="agent-cloud-item">
+        <img src="/agents/grok.svg" alt="Grok Build" class="agent-cloud-logo" />
+        <span>Grok</span>
       </a>
       <a href="#/agents" class="agent-cloud-item">
         <img src="/agents/cline.svg" alt="Cline" class="agent-cloud-logo" />

@@ -1,11 +1,13 @@
 import React, { memo } from 'react';
 import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
 import type { Toast } from '../../services/ToastService.js';
 import ToastNotification from './ToastNotification.js';
 
 interface FooterHelpProps {
   show: boolean;
   gridInfo?: string;
+  footerTip?: string;
   quitConfirmMode?: boolean;
   unreadErrorCount?: number;
   unreadWarningCount?: number;
@@ -17,6 +19,7 @@ interface FooterHelpProps {
 const FooterHelp: React.FC<FooterHelpProps> = memo(({
   show,
   gridInfo,
+  footerTip,
   quitConfirmMode = false,
   unreadErrorCount = 0,
   unreadWarningCount = 0,
@@ -52,12 +55,12 @@ const FooterHelp: React.FC<FooterHelpProps> = memo(({
     }
 
     // Toast format: "✓ message"
-    const iconAndSpaceLength = 2;
-    const toastTextLength = iconAndSpaceLength + currentToast.message.length;
+    const iconAndSpaceWidth = 2;
+    const toastTextWidth = iconAndSpaceWidth + stringWidth(currentToast.message);
 
     // Available width (sidebar is 40, minus some padding)
     const availableWidth = 38;
-    const wrappedLines = Math.ceil(toastTextLength / availableWidth);
+    const wrappedLines = Math.ceil(toastTextWidth / availableWidth);
 
     // Add 1 for header line
     return wrappedLines + 1;
@@ -94,7 +97,7 @@ const FooterHelp: React.FC<FooterHelpProps> = memo(({
   const hasNotifications = currentToast !== null || toastQueueLength > 0;
 
   return (
-    <Box marginTop={1} flexDirection="column">
+    <Box flexDirection="column">
       {/* Toast notification section - show header even when transitioning between toasts */}
       {hasNotifications ? (
         <Box height={toastHeight} marginBottom={1} flexDirection="column">
@@ -134,6 +137,12 @@ const FooterHelp: React.FC<FooterHelpProps> = memo(({
       <Text dimColor>
         Press <Text color="cyan">[?]</Text> for keyboard shortcuts
       </Text>
+
+      {footerTip && (
+        <Text dimColor wrap="truncate-end">
+          <Text color="green">Tip:</Text> {footerTip}
+        </Text>
+      )}
 
       {/* Debug info */}
       {gridInfo && (

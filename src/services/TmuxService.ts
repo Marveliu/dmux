@@ -264,11 +264,11 @@ export class TmuxService {
    */
   async getAllPaneInfo(
     scope: PaneListScope = 'window'
-  ): Promise<Array<PanePosition & { title: string }>> {
+  ): Promise<Array<PanePosition & { title: string; currentPath?: string }>> {
     const output = await this.executeNonBlocking(
       scope === 'window'
-        ? `tmux list-panes -F '#{pane_id}|#{pane_title}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}'`
-        : `tmux list-panes -a -F '#{session_name}|#{pane_id}|#{pane_title}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}'`
+        ? `tmux list-panes -F '#{pane_id}|#{pane_title}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}|#{pane_current_path}'`
+        : `tmux list-panes -a -F '#{session_name}|#{pane_id}|#{pane_title}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}|#{pane_current_path}'`
     );
     const currentSession = scope === 'session'
       ? await this.executeNonBlocking(`tmux display-message -p "#{session_name}"`)
@@ -290,7 +290,7 @@ export class TmuxService {
           return [];
         }
 
-        const [paneId, title, left, top, width, height] = values;
+        const [paneId, title, left, top, width, height, currentPath] = values;
         return [{
           paneId,
           title,
@@ -298,6 +298,7 @@ export class TmuxService {
           top: parseInt(top, 10),
           width: parseInt(width, 10),
           height: parseInt(height, 10),
+          currentPath: currentPath || undefined,
         }];
       });
   }
@@ -314,6 +315,24 @@ export class TmuxService {
       },
       RetryStrategy.IDEMPOTENT,
       'getCurrentPaneId'
+    );
+  }
+
+  /**
+   * Get the pane currently selected in the active dmux window.
+   *
+   * This uses pane_active from list-panes instead of display-message so it
+   * reflects tmux focus changes after this process was launched.
+   */
+  async getActivePaneId(scope: PaneListScope = 'window'): Promise<string | null> {
+    return this.executeWithRetry(
+      () => {
+        const lines = this.listPanesLines('#{pane_id} #{pane_active}', scope);
+        const activeLine = lines.find((line) => line.endsWith(' 1'));
+        return activeLine ? activeLine.split(' ')[0] : null;
+      },
+      RetryStrategy.IDEMPOTENT,
+      `getActivePaneId(${scope})`
     );
   }
 
@@ -622,6 +641,18 @@ export class TmuxService {
         this.execute(`tmux display-message -t '${paneId}' -p '#{pane_current_command}'`).trim(),
       RetryStrategy.FAST,
       `getPaneCurrentCommand(${paneId})`
+    );
+  }
+
+  /**
+   * Get the current working directory reported by tmux for a pane.
+   */
+  async getPaneCurrentPath(paneId: string): Promise<string> {
+    return this.executeWithRetry(
+      () =>
+        this.execute(`tmux display-message -t '${paneId}' -p '#{pane_current_path}'`).trim(),
+      RetryStrategy.IDEMPOTENT,
+      `getPaneCurrentPath(${paneId})`
     );
   }
 
@@ -1204,6 +1235,18 @@ export class TmuxService {
   }
 
   /**
+   * Get current session name (sync version for compatibility)
+   */
+  getCurrentSessionNameSync(): string {
+    try {
+      return this.execute('tmux display-message -p "#{session_name}"');
+    } catch (error) {
+      this.logger.warn('Failed to get current session name', 'TmuxService');
+      throw error;
+    }
+  }
+
+  /**
    * Get current pane ID (sync version for compatibility)
    */
   getCurrentPaneIdSync(): string {
@@ -1243,7 +1286,11 @@ export class TmuxService {
    */
   setPaneOptionSync(paneId: string, option: string, value: string): void {
     try {
-      this.execute(`tmux set-option -p -t '${paneId}' ${option} ${value}`, { silent: true });
+      const escapedValue = value.replace(/'/g, `'\\''`);
+      this.execute(
+        `tmux set-option -p -t '${paneId}' ${option} '${escapedValue}'`,
+        { silent: true }
+      );
     } catch (error) {
       this.logger.warn(`Failed to set pane option ${option} for ${paneId}`, 'TmuxService');
     }

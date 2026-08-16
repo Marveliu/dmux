@@ -18,6 +18,7 @@ interface InputPopupProps {
   message: string;
   placeholder?: string;
   defaultValue?: string;
+  maxVisibleLines?: number;
 }
 
 const InputPopupApp: React.FC<InputPopupProps> = ({
@@ -26,6 +27,7 @@ const InputPopupApp: React.FC<InputPopupProps> = ({
   message,
   placeholder = '',
   defaultValue = '',
+  maxVisibleLines,
 }) => {
   const [value, setValue] = useState(defaultValue);
   const { exit } = useApp();
@@ -52,6 +54,7 @@ const InputPopupApp: React.FC<InputPopupProps> = ({
               onChange={setValue}
               onSubmit={handleSubmit}
               placeholder={placeholder}
+              maxVisibleLines={maxVisibleLines}
             />
           </PopupInputBox>
         </Box>
@@ -80,6 +83,7 @@ function main() {
     message: string;
     placeholder?: string;
     defaultValue?: string;
+    maxVisibleLines?: number;
   };
 
   try {
@@ -97,6 +101,7 @@ function main() {
       message={data.message}
       placeholder={data.placeholder}
       defaultValue={data.defaultValue}
+      maxVisibleLines={data.maxVisibleLines}
     />
   );
 }

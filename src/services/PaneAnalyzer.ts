@@ -1,6 +1,8 @@
 import { createHash } from 'crypto';
 import { capturePaneContent } from '../utils/paneCapture.js';
 import { LogService } from './LogService.js';
+import { getPaneDisplayName } from '../utils/paneTitle.js';
+import { generateInferenceText, hasConfiguredInferenceSync } from './InferenceService.js';
 
 // State types for agent status
 export type PaneState = 'option_dialog' | 'open_prompt' | 'in_progress';
@@ -68,13 +70,6 @@ export function normalizePaneContentForAnalysis(
 }
 
 export class PaneAnalyzer {
-  private apiKey: string;
-  private modelStack: string[] = [
-    'google/gemini-2.5-flash',
-    'x-ai/grok-4-fast:free',
-    'openai/gpt-4o-mini'
-  ];
-
   // Content-hash based cache to avoid repeated API calls for identical content
   private cache = new Map<string, CacheEntry>();
   private readonly CACHE_TTL = 5000; // 5 seconds TTL
@@ -82,10 +77,6 @@ export class PaneAnalyzer {
 
   // Request deduplication - prevent multiple concurrent requests for same pane
   private pendingRequests = new Map<string, Promise<PaneAnalysis>>();
-
-  constructor() {
-    this.apiKey = process.env.OPENROUTER_API_KEY || '';
-  }
 
   /**
    * Hash content for cache key
@@ -129,95 +120,22 @@ export class PaneAnalyzer {
   }
 
 
-  /**
-   * Make a single API request to a specific model
-   */
-  private async tryModel(
-    model: string,
-    systemPrompt: string,
-    userPrompt: string,
-    maxTokens: number,
-    signal?: AbortSignal
-  ): Promise<any> {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://github.com/dmux/dmux',
-        'X-Title': 'dmux',
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.1,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' },
-      }),
-      signal
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`API error (${model}): ${response.status} ${errorText}`);
-    }
-
-    return response.json();
-  }
-
-  /**
-   * Makes a request to OpenRouter API with PARALLEL model fallback
-   * Uses Promise.any to race all models - first success wins
-   *
-   * Performance improvement: Previously could take 6+ seconds if models failed sequentially.
-   * Now returns as soon as ANY model responds successfully (typically <1s).
-   */
+  /** Make a request through the configured primary/backup inference stack. */
   private async makeRequestWithFallback(
     systemPrompt: string,
     userPrompt: string,
     maxTokens: number,
     signal?: AbortSignal
   ): Promise<any> {
-    if (!this.apiKey) {
-      throw new Error('API key not available');
-    }
-
-    const logService = LogService.getInstance();
-
-    // Create an AbortController with timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s total timeout
-
-    // Combine external signal with our timeout
-    const combinedSignal = signal
-      ? AbortSignal.any([signal, controller.signal])
-      : controller.signal;
-
-    try {
-      // Race all models in parallel - first success wins
-      const result = await Promise.any(
-        this.modelStack.map(model =>
-          this.tryModel(model, systemPrompt, userPrompt, maxTokens, combinedSignal)
-            .then(data => {
-              logService.debug(`PaneAnalyzer: Model ${model} succeeded`, 'paneAnalyzer');
-              return data;
-            })
-        )
-      );
-
-      return result;
-    } catch (error) {
-      if (error instanceof AggregateError) {
-        // All models failed - throw the first error for context
-        throw error.errors[0] || new Error('All models in fallback stack failed');
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    const content = await generateInferenceText(userPrompt, {
+      system: systemPrompt,
+      maxTokens,
+      temperature: 0.1,
+      timeoutMs: 10_000,
+      signal,
+    });
+    if (!content) throw new Error('Inference provider not available');
+    return { choices: [{ message: { content } }] };
   }
 
   /**
@@ -229,9 +147,8 @@ export class PaneAnalyzer {
   async determineState(content: string, signal?: AbortSignal, paneName?: string): Promise<PaneState> {
     const logService = LogService.getInstance();
 
-    if (!this.apiKey) {
-      // API key not set
-      logService.debug(`PaneAnalyzer: No API key set, defaulting to in_progress state${paneName ? ` for "${paneName}"` : ''}`, 'paneAnalyzer');
+    if (!hasConfiguredInferenceSync()) {
+      logService.debug(`PaneAnalyzer: No inference provider configured, defaulting to in_progress state${paneName ? ` for "${paneName}"` : ''}`, 'paneAnalyzer');
       return 'in_progress';
     }
 
@@ -314,8 +231,8 @@ CRITICAL:
     const logService = LogService.getInstance();
     const paneName = context.paneName;
 
-    if (!this.apiKey) {
-      logService.debug(`PaneAnalyzer: No API key set, cannot extract options${paneName ? ` for "${paneName}"` : ''}`, 'paneAnalyzer');
+    if (!hasConfiguredInferenceSync()) {
+      logService.debug(`PaneAnalyzer: No inference provider configured, cannot extract options${paneName ? ` for "${paneName}"` : ''}`, 'paneAnalyzer');
       return {};
     }
 
@@ -427,7 +344,7 @@ ${content}`,
     context: PaneContext,
     signal?: AbortSignal
   ): Promise<Pick<PaneAnalysis, 'summary' | 'attentionTitle' | 'attentionBody'>> {
-    if (!this.apiKey) {
+    if (!hasConfiguredInferenceSync()) {
       return {};
     }
 
@@ -539,7 +456,12 @@ ${content}`,
    * @param signal - Optional abort signal
    * @param dmuxPaneId - Optional dmux pane ID for friendly logging (e.g., "dmux-123")
    */
-  async analyzePane(tmuxPaneId: string, signal?: AbortSignal, dmuxPaneId?: string): Promise<PaneAnalysis> {
+  async analyzePane(
+    tmuxPaneId: string,
+    signal?: AbortSignal,
+    dmuxPaneId?: string,
+    capturedSnapshot?: string
+  ): Promise<PaneAnalysis> {
     const logService = LogService.getInstance();
 
     // For logging, try to get friendly name from StateManager
@@ -551,7 +473,7 @@ ${content}`,
         // Import dynamically to avoid circular dependency
         const { StateManager } = await import('../shared/StateManager.js');
         const pane = StateManager.getInstance().getPaneById(dmuxPaneId);
-        paneName = pane?.slug || dmuxPaneId;
+        paneName = pane ? getPaneDisplayName(pane) : dmuxPaneId;
         panePrompt = pane?.prompt;
         agentLabel = pane?.agent;
       } catch {
@@ -563,8 +485,11 @@ ${content}`,
 
     // Normalize the analyzer input to the last 50 trimmed lines so every LLM stage
     // sees the same bounded pane snapshot.
+    const analysisSource = typeof capturedSnapshot === 'string'
+      ? capturedSnapshot
+      : capturePaneContent(tmuxPaneId, ANALYZER_CONTEXT_LINE_LIMIT);
     const content = normalizePaneContentForAnalysis(
-      capturePaneContent(tmuxPaneId, ANALYZER_CONTEXT_LINE_LIMIT),
+      analysisSource,
       ANALYZER_CONTEXT_LINE_LIMIT
     );
 

@@ -308,7 +308,7 @@ const DmuxApp = ({ panesFile, projectName, sessionName, settingsFile, projectRoo
     // loadPanes moved to usePanes
     // getPanePositions moved to utils/tmux
     const sessionProjectRoot = projectRoot || process.cwd();
-    const projectActionLayout = useMemo(() => buildProjectActionLayout(panes, sessionProjectRoot, projectName), [panes, sessionProjectRoot, projectName]);
+    const projectActionLayout = useMemo(() => buildProjectActionLayout(panes, [], sessionProjectRoot, projectName), [panes, sessionProjectRoot, projectName]);
     const navigationRows = useMemo(() => isLoading
         ? projectActionLayout.groups.flatMap((group) => group.panes.map((entry) => [entry.index]))
         : buildVisualNavigationRows(projectActionLayout), [isLoading, projectActionLayout]);
@@ -321,15 +321,23 @@ const DmuxApp = ({ panesFile, projectName, sessionName, settingsFile, projectRoo
     const handlePaneCreationWithAgent = async (prompt, targetProjectRoot) => {
         const agents = availableAgents;
         const createPanesForAgents = async (selectedAgents) => {
-            const dedupedAgents = selectedAgents.filter((agent, index) => selectedAgents.indexOf(agent) === index);
+            const totalByAgent = new Map();
+            selectedAgents.forEach((agent) => totalByAgent.set(agent, (totalByAgent.get(agent) || 0) + 1));
+            const seenByAgent = new Map();
             let panesForCreation = panes;
-            const isMultiLaunch = dedupedAgents.length > 1;
+            const isMultiLaunch = selectedAgents.length > 1;
             const slugBase = isMultiLaunch ? await generateSlug(prompt) : undefined;
-            for (const selectedAgent of dedupedAgents) {
+            for (const selectedAgent of selectedAgents) {
+                const ordinal = (seenByAgent.get(selectedAgent) || 0) + 1;
+                seenByAgent.set(selectedAgent, ordinal);
+                const totalForAgent = totalByAgent.get(selectedAgent) || 1;
+                const baseSlugSuffix = getAgentSlugSuffix(selectedAgent);
                 const pane = await createNewPaneHook(prompt, selectedAgent, {
                     existingPanes: panesForCreation,
                     slugSuffix: isMultiLaunch
-                        ? getAgentSlugSuffix(selectedAgent)
+                        ? totalForAgent > 1
+                            ? baseSlugSuffix + "-" + ordinal
+                            : baseSlugSuffix
                         : undefined,
                     slugBase,
                     targetProjectRoot,
@@ -893,7 +901,7 @@ class Dmux {
                     \`set-option -t \${this.sessionName} pane-border-status top\`,
                     \`set-option -t \${this.sessionName} pane-active-border-style "fg=colour\${TMUX_COLORS.activeBorder}"\`,
                     \`set-option -t \${this.sessionName} pane-border-style "fg=colour\${TMUX_COLORS.inactiveBorder}"\`,
-                    \`set-option -t \${this.sessionName} pane-border-format " #{pane_title} "\`,
+                    \`set-option -t \${this.sessionName} pane-border-format " #{s|__dmux__.*$||:pane_title} "\`,
                     \`select-pane -t \${this.sessionName} -T "dmux v\${packageJson.version} - \${this.projectName}"\`,
                 ].join(' \\\\; ');
                 execSync(\`tmux \${sessionOptions}\`, { stdio: 'inherit' });
@@ -906,20 +914,12 @@ class Dmux {
                 // Determine the dmux command to use
                 let dmuxCommand;
                 if (isDev) {
-                    dmuxCommand = \`cd "\${devDirectory}" && pnpm dev:watch\`;
+                    const cleanPath = (process.env.PATH || '').split(path.delimiter).filter((entry) => entry && !entry.includes(\`\${path.sep}node_modules\${path.sep}.bin\`)).join(path.delimiter);
+                    dmuxCommand = \`cd "\${devDirectory}" && PATH='\${cleanPath.replace(/'/g, \`'\\\\''\`)}' pnpm dev:watch\`;
                 }
                 else {
-                    // Check if we're running from a local installation
-                    // __dirname is 'dist' when compiled, so '../dmux' points to the wrapper
-                    const localDmuxPath = path.join(__dirname, '..', 'dmux');
-                    if (fsSync.existsSync(localDmuxPath)) {
-                        // Use absolute path to local dmux (works for both local builds and global installs)
-                        dmuxCommand = \`"\${localDmuxPath}"\`;
-                    }
-                    else {
-                        // Fallback to global dmux command
-                        dmuxCommand = 'dmux';
-                    }
+                    const cleanPath = (process.env.PATH || '').split(path.delimiter).filter((entry) => entry && !entry.includes(\`\${path.sep}node_modules\${path.sep}.bin\`)).join(path.delimiter);
+                    dmuxCommand = \`PATH='\${cleanPath.replace(/'/g, \`'\\\\''\`)}' dmux\`;
                 }
                 execSync(\`tmux send-keys -t \${this.sessionName} "\${dmuxCommand}" Enter\`, { stdio: 'inherit' });
             }
@@ -1244,7 +1244,7 @@ class Dmux {
             if (creation.needsAgentChoice) {
                 selectedAgent = availableAgents[0];
                 if (!selectedAgent) {
-                    throw new Error('No supported agent CLI found (claude, opencode, codex)');
+                    throw new Error('No supported agent CLI found');
                 }
                 creation = await createPane({
                     prompt,

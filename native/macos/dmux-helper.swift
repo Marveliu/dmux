@@ -203,7 +203,6 @@ final class FocusMonitor: NSObject, NSUserNotificationCenterDelegate, NSSoundDel
     private var clients: [Int32: ClientConnection] = [:]
     private var lastSnapshot: FocusSnapshot?
     private var didRequestAccessibilityPrompt = false
-    private var activeNotificationSounds: [ObjectIdentifier: NSSound] = [:]
     private var activePreviewSounds: [ObjectIdentifier: NSSound] = [:]
     private var activePreviewNotification: NSUserNotification?
 
@@ -461,8 +460,6 @@ final class FocusMonitor: NSObject, NSUserNotificationCenterDelegate, NSSoundDel
         let center = NSUserNotificationCenter.default
         center.delegate = self
 
-        // Bundled notification sounds are played by the helper because Notification Center
-        // does not reliably honor custom NSUserNotification sounds on current macOS builds.
         let preparedSound = prepareNotificationSound(from: message.soundName)
         let notification = NSUserNotification()
         notification.identifier = UUID().uuidString
@@ -493,7 +490,6 @@ final class FocusMonitor: NSObject, NSUserNotificationCenterDelegate, NSSoundDel
         }
 
         center.deliver(notification)
-        playPreparedNotificationSound(preparedSound.helperSound)
     }
 
     private func prepareNotificationSound(from requestedSoundName: String?) -> PreparedNotificationSound {
@@ -526,21 +522,9 @@ final class FocusMonitor: NSObject, NSUserNotificationCenterDelegate, NSSoundDel
 
         helperSound.delegate = self
         return PreparedNotificationSound(
-            notificationSoundName: nil,
+            notificationSoundName: trimmedSoundName,
             helperSound: helperSound
         )
-    }
-
-    private func playPreparedNotificationSound(_ helperSound: NSSound?) {
-        guard let helperSound else {
-            return
-        }
-
-        let soundId = ObjectIdentifier(helperSound)
-        activeNotificationSounds[soundId] = helperSound
-        if !helperSound.play() {
-            activeNotificationSounds.removeValue(forKey: soundId)
-        }
     }
 
     private func playPreviewSound(_ message: PreviewSoundMessage) {
@@ -662,7 +646,6 @@ final class FocusMonitor: NSObject, NSUserNotificationCenterDelegate, NSSoundDel
     }
 
     func sound(_ sound: NSSound, didFinishPlaying aBool: Bool) {
-        activeNotificationSounds.removeValue(forKey: ObjectIdentifier(sound))
         activePreviewSounds.removeValue(forKey: ObjectIdentifier(sound))
     }
 

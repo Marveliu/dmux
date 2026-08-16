@@ -3,17 +3,19 @@
  * Requires tmux 3.2+
  */
 
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { POPUP_CONFIG } from '../components/popups/config.js';
 import { TmuxService } from '../services/TmuxService.js';
+import type { PanePosition } from '../types.js';
 
 export interface PopupOptions {
   width?: number;
   height?: number;
   title?: string;
+  themeName?: string;
   // If true, popup is centered. If false, you can provide x/y coordinates
   centered?: boolean;
   x?: number;
@@ -43,9 +45,36 @@ export interface PopupHandle<T> {
     width: number;
     height: number;
   };
+  readyPromise: Promise<void>;
   resultPromise: Promise<PopupResult<T>>;
   kill: () => void;
 }
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+export function getPaneAnchoredPopupOptions(
+  pane: PanePosition,
+  popupSize: { width: number; height: number },
+  clientSize: { width: number; height: number }
+): Pick<PopupOptions, 'centered' | 'x' | 'y' | 'width' | 'height'> {
+  const width = Math.min(popupSize.width, clientSize.width);
+  const height = Math.min(popupSize.height, clientSize.height);
+  const maxX = Math.max(0, clientSize.width - width);
+  const maxY = Math.max(0, clientSize.height - height);
+
+  return {
+    centered: false,
+    width,
+    height,
+    x: clamp(pane.left + Math.floor((pane.width - width) / 2), 0, maxX),
+    y: clamp(pane.top, 0, maxY),
+  };
+}
+
+const POPUP_READY_POLL_INTERVAL_MS = 25;
+const POPUP_READY_TIMEOUT_MS = 4000;
 
 /**
  * Calculate actual popup bounds based on tmux terminal dimensions
@@ -371,6 +400,7 @@ export function launchPopupNonBlocking(
   return {
     pid: child.pid!,
     bounds,
+    readyPromise: Promise.resolve(),
     resultPromise,
     kill: () => {
       try {
@@ -384,6 +414,45 @@ export function launchPopupNonBlocking(
       }
     },
   };
+}
+
+function waitForPopupReady(
+  child: ChildProcess,
+  readyFile: string
+): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const cleanup = () => {
+      clearInterval(pollInterval);
+      clearTimeout(timeout);
+      if (fs.existsSync(readyFile)) {
+        try {
+          fs.unlinkSync(readyFile);
+        } catch {
+          // Ignore cleanup races between the popup process and parent watcher.
+        }
+      }
+    };
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const pollInterval = setInterval(() => {
+      if (fs.existsSync(readyFile)) {
+        finish();
+      }
+    }, POPUP_READY_POLL_INTERVAL_MS);
+
+    const timeout = setTimeout(finish, POPUP_READY_TIMEOUT_MS);
+
+    child.once('close', finish);
+    child.once('error', finish);
+  });
 }
 
 /**
@@ -402,6 +471,7 @@ export function launchNodePopupNonBlocking<T = any>(
     width = 80,
     height = 20,
     title,
+    themeName,
     centered = true,
     x,
     y,
@@ -417,14 +487,29 @@ export function launchNodePopupNonBlocking<T = any>(
   // Get the result file path that the script will write to
   // IMPORTANT: Only create this ONCE - do NOT create it again in child.on('close')
   const resultFile = path.join(os.tmpdir(), `dmux-popup-${Date.now()}.json`);
+  const readyFile = path.join(
+    os.tmpdir(),
+    `dmux-popup-ready-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`
+  );
 
   // Build node command with proper escaping
   const escapedArgs = [scriptPath, resultFile, ...args].map(arg => {
     const escaped = arg.replace(/\\/g, '\\\\').replace(/'/g, "'\\''");
     return `'${escaped}'`;
   });
+  const escapedReadyFile = readyFile
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "'\\''");
 
-  const command = `node ${escapedArgs.join(' ')}`;
+  const envAssignments = [`DMUX_POPUP_READY_FILE='${escapedReadyFile}'`];
+  if (themeName) {
+    const escapedThemeName = themeName
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, "'\\''");
+    envAssignments.push(`DMUX_THEME='${escapedThemeName}'`);
+  }
+
+  const command = `${envAssignments.join(' ')} node ${escapedArgs.join(' ')}`;
 
   // Build tmux popup command
   const tmuxArgs: string[] = [
@@ -471,6 +556,7 @@ export function launchNodePopupNonBlocking<T = any>(
   const child = spawn('sh', ['-c', fullCommand], {
     stdio: 'inherit',
   });
+  const readyPromise = waitForPopupReady(child, readyFile);
 
   const resultPromise = new Promise<PopupResult<T>>((resolve) => {
     child.on('close', () => {
@@ -525,6 +611,7 @@ export function launchNodePopupNonBlocking<T = any>(
   return {
     pid: child.pid!,
     bounds,
+    readyPromise,
     resultPromise,
     kill: () => {
       try {
@@ -532,6 +619,9 @@ export function launchNodePopupNonBlocking<T = any>(
         // Clean up temp file
         if (fs.existsSync(resultFile)) {
           fs.unlinkSync(resultFile);
+        }
+        if (fs.existsSync(readyFile)) {
+          fs.unlinkSync(readyFile);
         }
       } catch {
         // Ignore errors if process already dead
@@ -548,12 +638,24 @@ export function ensureMouseMode(sessionName: string): void {
   try {
     const tmuxService = TmuxService.getInstance();
 
-    // Check if mouse mode is already enabled for this session
-    const mouseStatus = tmuxService.getSessionOptionSync(sessionName, 'mouse');
+    // dmux may be running inside a session whose name differs from the
+    // project-scoped one (e.g. launched in an existing session), so target
+    // the session this process actually lives in when it can be resolved.
+    let targetSession = sessionName;
+    try {
+      targetSession = tmuxService.getCurrentSessionNameSync().trim() || sessionName;
+    } catch {
+      // Fall back to the provided session name.
+    }
 
-    // If mouse is off, enable it for this session only (not global)
-    if (mouseStatus.includes('off')) {
-      tmuxService.setSessionOptionSync(sessionName, 'mouse', 'on');
+    // Session-level value when set, otherwise the inherited global value.
+    // An unset option reads as an empty string, which tmux treats as off.
+    const sessionStatus = tmuxService.getSessionOptionSync(targetSession, 'mouse').trim();
+    const effectiveStatus = sessionStatus || tmuxService.getGlobalOptionSync('mouse');
+
+    // If mouse is not on, enable it for this session only (not global)
+    if (!effectiveStatus.includes('on')) {
+      tmuxService.setSessionOptionSync(targetSession, 'mouse', 'on');
     }
   } catch {
     // Ignore errors - might not be in tmux session or session doesn't exist yet
@@ -629,5 +731,17 @@ export const POPUP_POSITIONING = {
       width: Math.min(terminalWidth - sidebarWidth - 2, 100),
       height: Math.floor(terminalHeight * 0.9),
     };
+  },
+
+  /**
+   * Anchor a popup to the top of a specific pane.
+   * Use for focused-pane actions launched from inside the pane.
+   */
+  overPane(
+    pane: PanePosition,
+    popupSize: { width: number; height: number },
+    clientSize: { width: number; height: number }
+  ): Partial<PopupOptions> {
+    return getPaneAnchoredPopupOptions(pane, popupSize, clientSize);
   },
 };

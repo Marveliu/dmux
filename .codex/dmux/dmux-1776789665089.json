@@ -1,0 +1,13 @@
+{
+  "source": "codex-stop-hook",
+  "dmuxPaneId": "dmux-1776789665089",
+  "tmuxPaneId": "%20",
+  "expectedDmuxPaneId": "dmux-1776789665089",
+  "expectedTmuxPaneId": "%20",
+  "hookEventName": "Stop",
+  "turnId": "019db0ea-c07b-7e91-b557-1c3d95010253",
+  "lastAssistantMessage": "Implemented the pane visibility fix.\n\nWhat changed:\n- New panes now choose a split target from panes actually visible in the current tmux window, instead of blindly splitting from the last tracked pane. This prevents new panes from being created inside a hidden detached tmux window. See [paneCreation.ts](/Users/justinschroeder/Projects/dmux/.dmux/worktrees/hidden-panes/src/utils/paneCreation.ts:86).\n- Layout recalculation during creation now only includes currently visible existing panes plus the new pane.\n- Newly-created pane records are explicitly saved with `hidden: false`. See [paneCreation.ts](/Users/justinschroeder/Projects/dmux/.dmux/worktrees/hidden-panes/src/utils/paneCreation.ts:556).\n- Added a regression test where the newest tracked pane is hidden, and creation correctly splits from the visible pane instead. See [paneLifecycle.test.ts](/Users/justinschroeder/Projects/dmux/.dmux/worktrees/hidden-panes/__tests__/integration/paneLifecycle.test.ts:415).\n\nVerification:\n- `pnpm exec vitest --run __tests__/integration/paneLifecycle.test.ts __tests__/paneVisibility.test.ts` passed.\n- `pnpm run typecheck` passed.\n- I also let the broader accidental Vitest run complete earlier; it passed as well.\n\nThere is an existing untracked `.codex/` directory in the worktree; I left it untouched.",
+  "transcriptPath": "/Users/justinschroeder/.codex/sessions/2026/04/21/rollout-2026-04-21T12-41-07-019db0ea-bd6a-7613-99a5-031a99acd6e2.jsonl",
+  "cwd": "/Users/justinschroeder/Projects/dmux/.dmux/worktrees/hidden-panes",
+  "timestamp": 1776789890904
+}

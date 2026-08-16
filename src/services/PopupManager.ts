@@ -3,13 +3,26 @@ import path from "path"
 import {
   launchNodePopupNonBlocking,
   POPUP_POSITIONING,
+  type PopupOptions as TmuxPopupOptions,
   type PopupResult,
 } from "../utils/popup.js"
 import { StateManager } from "../shared/StateManager.js"
 import { LogService } from "./LogService.js"
 import { TmuxService } from "./TmuxService.js"
-import { SETTING_DEFINITIONS } from "../utils/settingsManager.js"
-import type { DmuxPane, ProjectSettings } from "../types.js"
+import {
+  DEFAULT_COLOR_THEME_SETTING_KEY,
+  getLocalizedSettingDefinitions,
+  SETTING_DEFINITIONS,
+} from "../utils/settingsManager.js"
+import type {
+  DmuxPane,
+  DmuxThemeName,
+  InferenceTarget,
+  NewPaneInput,
+  ProjectSettings,
+  SettingDefinition,
+  SidebarProject,
+} from "../types.js"
 import { getPaneMenuActions, type PaneMenuActionId } from "../actions/index.js"
 import { INPUT_IGNORE_DELAY } from "../constants/timing.js"
 import {
@@ -25,7 +38,20 @@ import {
 } from "../utils/notificationSounds.js"
 import { resolveDistPath } from "../utils/runtimePaths.js"
 import { getPaneProjectRoot } from "../utils/paneProject.js"
+import { getPaneDisplayName } from "../utils/paneTitle.js"
 import type { TrackProjectActivity } from "../types/activity.js"
+import { SettingsManager } from "../utils/settingsManager.js"
+import { DEFAULT_DMUX_THEME, DMUX_THEME_NAMES } from "../theme/themePalette.js"
+import {
+  AUTO_SIDEBAR_PROJECT_COLOR_THEME_VALUE,
+  getSidebarProjectColorThemeSettingValue,
+  SIDEBAR_PROJECT_COLOR_THEME_SETTING_KEY,
+} from "../utils/sidebarProjects.js"
+import { resolveProjectColorTheme } from "../utils/paneColors.js"
+import type {
+  ReopenWorktreePopupResult,
+  ReopenWorktreePopupState,
+} from "../components/popups/reopenWorktreePopup.js"
 
 export interface PopupManagerConfig {
   sidebarWidth: number
@@ -45,7 +71,9 @@ interface PopupOptions {
   width?: number
   height?: number
   title: string
-  positioning?: "standard" | "centered" | "large"
+  themeName?: DmuxThemeName
+  positioning?: "standard" | "centered" | "large" | "pane"
+  targetPaneId?: string
 }
 
 interface MergeUncommittedChoiceData {
@@ -54,6 +82,10 @@ interface MergeUncommittedChoiceData {
   targetBranch: string
   files: string[]
   diffMode?: "working-tree" | "target-branch"
+}
+
+interface LaunchNewPanePopupOptions {
+  allowGitOptions?: boolean;
 }
 
 function isMergeUncommittedChoiceData(
@@ -141,6 +173,23 @@ export class PopupManager {
     return projectRoot || this.config.projectRoot
   }
 
+  private getSettingsManager(projectRoot?: string) {
+    const resolvedProjectRoot = projectRoot || this.config.projectRoot
+    if (!projectRoot || resolvedProjectRoot === this.config.projectRoot) {
+      if (typeof this.config.settingsManager?.reloadSettings === "function") {
+        this.config.settingsManager.reloadSettings()
+      }
+      return this.config.settingsManager
+    }
+
+    return new SettingsManager(resolvedProjectRoot)
+  }
+
+  private getAvailableAgents(projectRoot?: string): AgentName[] {
+    const settings = this.getSettingsManager(projectRoot).getSettings()
+    return resolveEnabledAgentsSelection(settings.enabledAgents)
+  }
+
   /**
    * Generic popup launcher with common logic
    */
@@ -163,7 +212,7 @@ export class PopupManager {
           args = [tempFile, ...args]
         }
 
-        let positioning
+        let positioning: Partial<TmuxPopupOptions>
         if (options.positioning === "large") {
           const tmuxService = TmuxService.getInstance()
           const dims = await tmuxService.getAllDimensions()
@@ -176,16 +225,58 @@ export class PopupManager {
           positioning = POPUP_POSITIONING.centeredWithSidebar(
             this.config.sidebarWidth
           )
+        } else if (
+          options.positioning === "pane"
+          && options.targetPaneId
+        ) {
+          const tmuxService = TmuxService.getInstance()
+          const [dims, panePositions] = await Promise.all([
+            tmuxService.getAllDimensions(),
+            tmuxService.getPanePositions(),
+          ])
+          const targetPane = panePositions.find(
+            (pane) => pane.paneId === options.targetPaneId
+          )
+
+          positioning = targetPane
+            ? POPUP_POSITIONING.overPane(
+                targetPane,
+                {
+                  width: options.width ?? 80,
+                  height: options.height ?? 20,
+                },
+                {
+                  width: dims.clientWidth,
+                  height: dims.clientHeight,
+                }
+              )
+            : POPUP_POSITIONING.standard(this.config.sidebarWidth)
         } else {
           positioning = POPUP_POSITIONING.standard(this.config.sidebarWidth)
         }
 
-        return launchNodePopupNonBlocking<T>(popupScriptPath, args, {
+        const popupOptions: TmuxPopupOptions = {
           ...positioning,
-          ...(options.width !== undefined && { width: options.width }),
-          ...(options.height !== undefined && { height: options.height }),
           title: options.title,
-        })
+          themeName: options.themeName,
+          cwd: projectRoot || this.config.projectRoot,
+        }
+
+        if (positioning.width !== undefined || options.width !== undefined) {
+          popupOptions.width = positioning.width ?? options.width
+        }
+
+        if (positioning.height !== undefined || options.height !== undefined) {
+          popupOptions.height = positioning.height ?? options.height
+        }
+
+        const popupHandle = launchNodePopupNonBlocking<T>(
+          popupScriptPath,
+          args,
+          popupOptions
+        )
+        await popupHandle.readyPromise
+        return popupHandle
       }, this.resolveActivityProjectRoot(projectRoot))
 
       // Wait for result
@@ -238,15 +329,55 @@ export class PopupManager {
     return null
   }
 
-  async launchNewPanePopup(projectPath?: string): Promise<string | null> {
+  private normalizeNewPaneInput(data: unknown): NewPaneInput | null {
+    if (typeof data === "string") {
+      return { prompt: data }
+    }
+
+    if (!data || typeof data !== "object") {
+      return null
+    }
+
+    const candidate = data as Record<string, unknown>
+    if (typeof candidate.prompt !== "string") {
+      return null
+    }
+
+    const normalized: NewPaneInput = { prompt: candidate.prompt }
+    if (typeof candidate.baseBranch === "string") {
+      const value = candidate.baseBranch.trim()
+      if (value) normalized.baseBranch = value
+    }
+    if (typeof candidate.branchName === "string") {
+      const value = candidate.branchName.trim()
+      if (value) normalized.branchName = value
+    }
+    if (typeof candidate.goalMode === "boolean") {
+      normalized.goalMode = candidate.goalMode
+    }
+
+    return normalized
+  }
+
+  async launchNewPanePopup(
+    projectPath?: string,
+    options: LaunchNewPanePopupOptions = {}
+  ): Promise<NewPaneInput | null> {
     if (!this.checkPopupSupport()) return null
 
     try {
       const popupHeight = Math.floor(this.config.terminalHeight * 0.8)
-      const popupArgs = projectPath ? [projectPath] : []
       const effectivePath = projectPath || this.config.projectRoot
+      const settings = this.getSettingsManager(effectivePath).getSettings()
+      const shouldPromptForGitOptions =
+        (settings.promptForGitOptionsOnCreate ?? false) && (options.allowGitOptions ?? true)
+      const popupArgs = [
+        effectivePath,
+        shouldPromptForGitOptions ? "1" : "0",
+        settings.enableGoalModeByDefault ? "1" : "0",
+      ]
       const projectName = effectivePath ? path.basename(effectivePath) : "dmux"
-      const result = await this.launchPopup<string>(
+      const result = await this.launchPopup<unknown>(
         "newPanePopup.js",
         popupArgs,
         {
@@ -260,7 +391,8 @@ export class PopupManager {
       )
 
       this.ignoreInputBriefly()
-      return this.handleResult(result)
+      const data = this.handleResult(result)
+      return this.normalizeNewPaneInput(data)
     } catch (error: any) {
       this.showTempMessage(`Failed to launch popup: ${error.message}`)
       return null
@@ -269,7 +401,8 @@ export class PopupManager {
 
   async launchKebabMenuPopup(
     pane: DmuxPane,
-    panes: DmuxPane[]
+    panes: DmuxPane[],
+    options: { anchorToPane?: boolean } = {}
   ): Promise<PaneMenuActionId | null> {
     if (!this.checkPopupSupport()) return null
 
@@ -283,11 +416,13 @@ export class PopupManager {
       )
       const result = await this.launchPopup<string>(
         "kebabMenuPopup.js",
-        [pane.slug, JSON.stringify(actions)],
+        [getPaneDisplayName(pane), JSON.stringify(actions)],
         {
           width: 60,
-          height: Math.min(20, actions.length + 5),
-          title: `Menu: ${pane.slug}`,
+          height: Math.min(26, actions.length + 6),
+          title: `Menu: ${getPaneDisplayName(pane)}`,
+          positioning: options.anchorToPane ? "pane" : "standard",
+          targetPaneId: options.anchorToPane ? pane.paneId : undefined,
         },
         undefined,
         getPaneProjectRoot(pane, this.config.projectRoot)
@@ -352,16 +487,21 @@ export class PopupManager {
     if (!this.checkPopupSupport()) return null
 
     try {
-      const agentsJson = JSON.stringify(this.config.availableAgents)
-      const settings = this.config.settingsManager.getSettings()
+      const availableAgents = this.getAvailableAgents(projectRoot)
+      if (availableAgents.length === 0) {
+        return []
+      }
+
+      const agentsJson = JSON.stringify(availableAgents)
+      const settings = this.getSettingsManager(projectRoot).getSettings()
       const defaultAgent = settings.defaultAgent
       const initialSelectedAgents =
         defaultAgent &&
         isAgentName(defaultAgent) &&
-        this.config.availableAgents.includes(defaultAgent)
+        availableAgents.includes(defaultAgent)
           ? [defaultAgent]
-          : []
-      const popupHeight = Math.max(12, this.config.availableAgents.length + 8)
+          : [availableAgents[0]]
+      const popupHeight = Math.max(13, availableAgents.length + 9)
 
       const result = await this.launchPopup<AgentName[]>(
         "agentChoicePopup.js",
@@ -372,6 +512,47 @@ export class PopupManager {
           title: "Select Agent(s)",
         },
         undefined,
+        projectRoot
+      )
+
+      return this.handleResult(result)
+    } catch (error: any) {
+      this.showTempMessage(`Failed to launch popup: ${error.message}`)
+      return null
+    }
+  }
+
+  async launchSingleAgentChoicePopup(
+    title: string = "Select Agent",
+    message?: string,
+    projectRoot?: string
+  ): Promise<AgentName | null> {
+    if (!this.checkPopupSupport()) return null
+
+    try {
+      const availableAgents = this.getAvailableAgents(projectRoot)
+      if (availableAgents.length === 0) return null
+
+      const settings = this.getSettingsManager(projectRoot).getSettings()
+      const defaultAgent = settings.defaultAgent
+      const popupHeight = Math.max(12, Math.min(20, availableAgents.length + 8))
+
+      const result = await this.launchPopup<AgentName>(
+        "singleAgentChoicePopup.js",
+        [],
+        {
+          width: 72,
+          height: popupHeight,
+          title,
+        },
+        {
+          title,
+          message,
+          options: availableAgents.map((agent) => ({
+            id: agent,
+            default: defaultAgent === agent,
+          })),
+        },
         projectRoot
       )
 
@@ -506,15 +687,72 @@ export class PopupManager {
 
   async launchSettingsPopup(
     onLaunchHooks: () => Promise<void>,
-    projectRoot?: string
+    projectRoot?: string,
+    sidebarProjects: SidebarProject[] = []
   ): Promise<
-    | { key: string; value: any; scope: "global" | "project" }
-    | { updates: Array<{ key: string; value: any; scope: "global" | "project" }> }
+    | { key: string; value: any; scope: "global" | "project" | "session" }
+    | { updates: Array<{ key: string; value: any; scope: "global" | "project" | "session" }> }
     | null
   > {
     if (!this.checkPopupSupport()) return null
 
     try {
+      const resolvedProjectRoot = projectRoot || this.config.projectRoot
+      const settingsManager = new SettingsManager(resolvedProjectRoot)
+      const resolveSavedProjectTheme = (targetProjectRoot: string) =>
+        new SettingsManager(targetProjectRoot).getSettings().colorTheme
+      const effectiveProjectTheme = resolveProjectColorTheme(
+        resolvedProjectRoot,
+        sidebarProjects
+      )
+      const localizedDefinitions = getLocalizedSettingDefinitions()
+      const colorThemeSettingIndex = localizedDefinitions.findIndex(
+        (definition) => definition.key === "colorTheme"
+      )
+      const settingDefinitions: SettingDefinition[] = localizedDefinitions
+        .filter((definition) => definition.key !== "colorTheme")
+
+      const defaultColorThemeSetting: SettingDefinition = {
+        key: DEFAULT_COLOR_THEME_SETTING_KEY,
+        label: "Default Color Theme",
+        description: "Fallback color used when a project does not have its own saved theme",
+        type: "select",
+        scopeBehavior: "global",
+        options: DMUX_THEME_NAMES.map((themeName) => ({
+          value: themeName,
+          label: themeName.charAt(0).toUpperCase() + themeName.slice(1),
+        })),
+      }
+      const projectColorThemeSetting: SettingDefinition = {
+        key: SIDEBAR_PROJECT_COLOR_THEME_SETTING_KEY,
+        label: "Project Color Theme",
+        description: "Color for this project in the current dmux session. Auto picks an unused color; inherit follows the project's saved/default theme.",
+        type: "select",
+        scopeBehavior: "session",
+        options: [
+          { value: AUTO_SIDEBAR_PROJECT_COLOR_THEME_VALUE, label: "Auto" },
+          { value: "", label: "Inherit Default Theme" },
+          ...DMUX_THEME_NAMES.map((themeName) => ({
+            value: themeName,
+            label: themeName.charAt(0).toUpperCase() + themeName.slice(1),
+          })),
+        ],
+      }
+      const currentSessionProjectThemeSetting = getSidebarProjectColorThemeSettingValue(
+        sidebarProjects,
+        resolvedProjectRoot,
+        resolveSavedProjectTheme
+      )
+      const insertIndex = colorThemeSettingIndex === -1
+        ? settingDefinitions.length
+        : colorThemeSettingIndex
+      settingDefinitions.splice(
+        insertIndex,
+        0,
+        defaultColorThemeSetting,
+        projectColorThemeSetting
+      )
+
       let settingsPopupWidth = 84
       try {
         // Use tmux client dimensions, not the dmux pane's stdout width.
@@ -530,18 +768,29 @@ export class PopupManager {
         [],
         {
           width: settingsPopupWidth,
-          height: Math.min(25, SETTING_DEFINITIONS.length + 8),
+          height: Math.min(25, settingDefinitions.length + 8),
           title: "⚙️  Settings",
+          themeName: effectiveProjectTheme,
         },
         {
-          settingDefinitions: SETTING_DEFINITIONS,
-          settings: this.config.settingsManager.getSettings(),
-          globalSettings: this.config.settingsManager.getGlobalSettings(),
-          projectSettings: this.config.settingsManager.getProjectSettings(),
-          projectRoot: this.config.projectRoot,
+          settingDefinitions,
+          settings: {
+            ...settingsManager.getSettings(),
+            [DEFAULT_COLOR_THEME_SETTING_KEY]:
+              settingsManager.getGlobalSettings().colorTheme
+              ?? settingsManager.getTeamDefaults().colorTheme
+              ?? DEFAULT_DMUX_THEME,
+            [SIDEBAR_PROJECT_COLOR_THEME_SETTING_KEY]:
+              currentSessionProjectThemeSetting
+              || settingsManager.getProjectSettings().colorTheme
+              || "",
+          } as Record<string, unknown>,
+          globalSettings: settingsManager.getGlobalSettings(),
+          projectSettings: settingsManager.getProjectSettings(),
+          projectRoot: resolvedProjectRoot,
           controlPaneId: this.config.controlPaneId,
         },
-        projectRoot
+        resolvedProjectRoot
       )
 
       if (result.success) {
@@ -550,7 +799,11 @@ export class PopupManager {
           ? data.updates.filter(
               (update: any) =>
                 typeof update?.key === "string"
-                && (update?.scope === "global" || update?.scope === "project")
+                && (
+                  update?.scope === "global"
+                  || update?.scope === "project"
+                  || update?.scope === "session"
+                )
             )
           : []
 
@@ -561,7 +814,7 @@ export class PopupManager {
         }
 
         if (data.action === "enabledAgents") {
-          const enabledAgentsUpdate = await this.launchEnabledAgentsPopup(projectRoot)
+          const enabledAgentsUpdate = await this.launchEnabledAgentsPopup(resolvedProjectRoot)
           if (enabledAgentsUpdate) {
             pendingUpdates.push(enabledAgentsUpdate)
           }
@@ -569,14 +822,29 @@ export class PopupManager {
         }
 
         if (data.action === "enabledNotificationSounds") {
-          const notificationSoundsUpdate = await this.launchNotificationSoundsPopup(projectRoot)
+          const notificationSoundsUpdate = await this.launchNotificationSoundsPopup(resolvedProjectRoot)
           if (notificationSoundsUpdate) {
             pendingUpdates.push(notificationSoundsUpdate)
           }
           return pendingUpdates.length > 0 ? { updates: pendingUpdates } : null
         }
 
-        if (typeof data.key === "string" && (data.scope === "global" || data.scope === "project")) {
+        if (data.action === "inferenceProviders") {
+          const inferenceUpdates = await this.launchInferenceSetupPopup(resolvedProjectRoot)
+          if (inferenceUpdates) {
+            pendingUpdates.push(...inferenceUpdates)
+          }
+          return pendingUpdates.length > 0 ? { updates: pendingUpdates } : null
+        }
+
+        if (
+          typeof data.key === "string"
+          && (
+            data.scope === "global"
+            || data.scope === "project"
+            || data.scope === "session"
+          )
+        ) {
           if (pendingUpdates.length > 0) {
             return {
               updates: [
@@ -609,7 +877,7 @@ export class PopupManager {
     if (!this.checkPopupSupport()) return null
 
     try {
-      const settings = this.config.settingsManager.getSettings()
+      const settings = this.getSettingsManager(projectRoot).getSettings()
       const configuredEnabled = resolveEnabledAgentsSelection(settings.enabledAgents)
       const definitions = getAgentDefinitions().map((definition) => ({
         id: definition.id,
@@ -659,7 +927,7 @@ export class PopupManager {
     if (!this.checkPopupSupport()) return null
 
     try {
-      const settings = this.config.settingsManager.getSettings()
+      const settings = this.getSettingsManager(projectRoot).getSettings()
       const configuredEnabled = resolveNotificationSoundsSelection(settings.enabledNotificationSounds)
       const definitions = getNotificationSoundDefinitions().map((definition) => ({
         id: definition.id,
@@ -695,6 +963,44 @@ export class PopupManager {
       }
     } catch (error: any) {
       this.showTempMessage(`Failed to launch popup: ${error.message}`)
+      return null
+    }
+  }
+
+  async launchInferenceSetupPopup(
+    projectRoot?: string
+  ): Promise<Array<{
+    key: "inferencePrimary" | "inferenceBackup";
+    value: InferenceTarget | null;
+    scope: "global";
+  }> | null> {
+    if (!this.checkPopupSupport()) return null
+
+    try {
+      const result = await this.launchPopup<{
+        primary: InferenceTarget;
+        backup: InferenceTarget | null;
+      }>(
+        "inferenceSetupPopup.js",
+        [],
+        {
+          width: 90,
+          height: 22,
+          title: "Inference Providers",
+          positioning: "centered",
+        },
+        undefined,
+        projectRoot
+      )
+
+      const data = this.handleResult(result)
+      if (!data) return null
+      return [
+        { key: "inferencePrimary", value: data.primary, scope: "global" },
+        { key: "inferenceBackup", value: data.backup, scope: "global" },
+      ]
+    } catch (error: any) {
+      this.showTempMessage(`Inference setup failed: ${error.message}`)
       return null
     }
   }
@@ -828,25 +1134,85 @@ export class PopupManager {
     }
   }
 
-  async launchInputPopup(
-    title: string,
-    message: string,
-    placeholder?: string,
-    defaultValue?: string,
+  async launchPRReviewPopup(
+    data: {
+      title: string
+      message: string
+      defaultValue: string
+      repoPath: string
+      sourceBranch: string
+      targetBranch: string
+      files: string[]
+      aiFailed?: boolean
+    },
     projectRoot?: string
   ): Promise<string | null> {
     if (!this.checkPopupSupport()) return null
 
     try {
+      const sidebar = this.config.sidebarWidth
+      const client = TmuxService.getInstance().getTerminalDimensionsSync()
+      const clientWidth = client.width || this.config.terminalWidth
+      const clientHeight = client.height || this.config.terminalHeight
+      const available = Math.max(0, clientWidth - sidebar - 2)
+      const width = Math.max(72, Math.floor(available * 0.4))
+      const height = Math.max(24, Math.min(clientHeight - 2, 48))
+
+      const result = await this.launchPopup<string>(
+        "prReviewPopup.js",
+        [],
+        {
+          width,
+          height,
+          title: data.title || "Pull Request",
+        },
+        data,
+        projectRoot
+      )
+
+      return this.handleResult(result)
+    } catch (error: any) {
+      this.showTempMessage(`Failed to launch popup: ${error.message}`)
+      return null
+    }
+  }
+
+  async launchInputPopup(
+    title: string,
+    message: string,
+    placeholder?: string,
+    defaultValue?: string,
+    projectRoot?: string,
+    maxVisibleLines?: number
+  ): Promise<string | null> {
+    if (!this.checkPopupSupport()) return null
+
+    try {
+      const messageLines = message ? message.split("\n").length : 1
+      const scrollable = typeof maxVisibleLines === "number" && maxVisibleLines > 0
+
+      // Overhead: borders(2) + container padding(2) + input border(2) + input padding(0) +
+      // section spacing(1) + input bottom margin(1) + help line(1) + safety(1) = ~10
+      const overhead = 10
+      const inputLines = scrollable ? maxVisibleLines! : 1
+      const desiredHeight = messageLines + inputLines + overhead
+      const maxHeight = Math.max(10, this.config.terminalHeight - 2)
+      const height = Math.min(maxHeight, Math.max(15, desiredHeight))
+
+      const desiredWidth = scrollable
+        ? Math.min(this.config.terminalWidth - this.config.sidebarWidth - 4, 100)
+        : 70
+      const width = Math.max(50, desiredWidth)
+
       const result = await this.launchPopup<string>(
         "inputPopup.js",
         [],
         {
-          width: 70,
-          height: 15,
+          width,
+          height,
           title: title || "Input",
         },
-        { title, message, placeholder, defaultValue },
+        { title, message, placeholder, defaultValue, maxVisibleLines },
         projectRoot
       )
 
@@ -895,32 +1261,53 @@ export class PopupManager {
 
   async launchReopenWorktreePopup(
     worktrees: Array<{
-      slug: string
-      path: string
-      lastModified: Date
-      branch: string
+      branchName: string
+      slug?: string
+      path?: string
+      lastModified?: Date
       hasUncommittedChanges: boolean
+      hasWorktree: boolean
+      hasLocalBranch: boolean
+      hasRemoteBranch: boolean
+      isRemote: boolean
     }>,
-    projectRoot?: string
-  ): Promise<{ slug: string; path: string } | null> {
+    projectRoot?: string,
+    initialState: ReopenWorktreePopupState = {
+      includeWorktrees: true,
+      includeLocalBranches: true,
+      includeRemoteBranches: true,
+      remoteLoaded: false,
+      filterQuery: "",
+    },
+    activePaneSlugs: string[] = []
+  ): Promise<ReopenWorktreePopupResult | null> {
     if (!this.checkPopupSupport()) return null
 
     try {
-      // Convert Date objects to ISO strings for JSON serialization
+      const popupProjectRoot = projectRoot || this.config.projectRoot
+      const popupProjectName = path.basename(popupProjectRoot) || popupProjectRoot
+      const maxVisibleRows = 8
+
       const worktreesData = worktrees.map((wt) => ({
         ...wt,
-        lastModified: wt.lastModified.toISOString(),
+        lastModified: wt.lastModified?.toISOString(),
       }))
 
-      const result = await this.launchPopup<{ slug: string; path: string }>(
+      const result = await this.launchPopup<ReopenWorktreePopupResult>(
         "reopenWorktreePopup.js",
         [],
         {
-          width: 70,
-          height: Math.min(25, worktrees.length * 3 + 8),
-          title: "📂 Reopen Closed Worktree",
+          width: 78,
+          height: Math.max(25, Math.min(28, Math.min(worktrees.length, maxVisibleRows) + 17)),
+          title: `Resume Branch: ${popupProjectName}`,
         },
-        { worktrees: worktreesData },
+        {
+          projectName: popupProjectName,
+          worktrees: worktreesData,
+          initialState,
+          projectRoot: popupProjectRoot,
+          activePaneSlugs,
+        },
         projectRoot
       )
 

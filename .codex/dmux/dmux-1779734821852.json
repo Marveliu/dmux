@@ -1,0 +1,15 @@
+{
+  "source": "codex-hook",
+  "dmuxPaneId": "dmux-1779734821852",
+  "tmuxPaneId": "%37",
+  "hookEventName": "Stop",
+  "turnId": "019e60ae-22af-7c71-b977-21ba45e0277a",
+  "sessionId": "019e6076-47cd-7933-a982-14fe111e58c2",
+  "toolName": "",
+  "approvalDescription": null,
+  "dmuxStatus": "idle",
+  "lastAssistantMessage": "Confirmed. The failure is real:\n\n- `x-ai/grok-4-fast:free` now returns `404` because Grok 4 Fast is deprecated.\n- `google/gemini-2.5-flash` and `openai/gpt-4o-mini` return `403` because the current OpenRouter key has hit its total limit.\n- Current xAI replacements like `x-ai/grok-4.3` and `x-ai/grok-build-0.1` are available, but also blocked by that key limit.\n\nI patched dmux so pane analysis no longer depends on the deprecated Grok model:\n- Removed `x-ai/grok-4-fast:free`.\n- Kept Gemini/GPT-4o-mini as preferred models.\n- Added a second-tier free fallback using tested JSON-capable models: `openai/gpt-oss-120b:free`, then `nvidia/nemotron-3-super-120b-a12b:free`.\n- Updated slug/merge OpenRouter fallbacks and docs.\n- Added a regression test so the deprecated model does not come back.\n\nLive patched analyzer check succeeded with the current capped key: it returned `{\"state\":\"open_prompt\"}`.\n\nValidation:\n- `pnpm run typecheck` passed.\n- `pnpm exec vitest --run __tests__/paneAnalyzer.test.ts __tests__/paneAnalyzer.snapshot.test.ts` passed.\n- A broader `pnpm test -- paneAnalyzer` invocation ran nearly the whole suite and hit one unrelated `paneLifecycle` timeout; the analyzer tests themselves passed.",
+  "transcriptPath": "/Users/justinschroeder/.codex/sessions/2026/05/25/rollout-2026-05-25T14-47-04-019e6076-47cd-7933-a982-14fe111e58c2.jsonl",
+  "cwd": "/Users/justinschroeder/Projects/dmux/.dmux/worktrees/feat-grok",
+  "timestamp": 1779738857784
+}

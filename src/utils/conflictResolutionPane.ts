@@ -6,7 +6,11 @@
 
 import type { DmuxPane } from '../types.js';
 import { TmuxService } from '../services/TmuxService.js';
-import { enforceControlPaneSize, splitPane } from './tmux.js';
+import {
+  enforceControlPaneSize,
+  ensurePaneBorderStatusForCurrentSession,
+  splitPane,
+} from './tmux.js';
 import { capturePaneContent } from './paneCapture.js';
 import { SIDEBAR_WIDTH } from './layoutManager.js';
 import { TMUX_LAYOUT_APPLY_DELAY, TMUX_SPLIT_DELAY } from '../constants/timing.js';
@@ -28,6 +32,7 @@ import {
   type AgentName,
 } from './agentLaunch.js';
 import { sendPromptViaTmux } from './agentPromptDispatch.js';
+import { resolveProjectColorTheme } from './paneColors.js';
 
 export interface ConflictResolutionPaneOptions {
   sourceBranch: string;      // Branch being merged (the worktree branch)
@@ -60,7 +65,7 @@ export async function createConflictResolutionPane(
 
   // Enable pane borders to show titles
   try {
-    tmuxService.setGlobalOptionSync('pane-border-status', 'top');
+    ensurePaneBorderStatusForCurrentSession();
   } catch {
     // Ignore if already set or fails
   }
@@ -205,6 +210,9 @@ export async function createConflictResolutionPane(
     slug,
     prompt,
     paneId: paneInfo,
+    projectRoot: targetRepoPath,
+    projectName,
+    colorTheme: resolveProjectColorTheme(targetRepoPath, []),
     agent,
     // Note: No worktreePath - this pane operates directly in the target repo
   };

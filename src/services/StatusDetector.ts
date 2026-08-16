@@ -1,12 +1,17 @@
 import { EventEmitter } from 'events';
 import type { DmuxPane, AgentStatus, OptionChoice, PotentialHarm } from '../types.js';
 import { WorkerMessageBus } from './WorkerMessageBus.js';
-import { PaneWorkerManager } from './PaneWorkerManager.js';
+import {
+  PaneWorkerManager,
+  shouldMonitorPaneForStatusTracking,
+} from './PaneWorkerManager.js';
 import { PaneAnalyzer } from './PaneAnalyzer.js';
 import type { PaneAnalysis } from './PaneAnalyzer.js';
 import type { OutboundMessage } from '../workers/WorkerMessages.js';
+import type { AgentTurnStoppedPayload } from '../workers/WorkerMessages.js';
 import { StateManager } from '../shared/StateManager.js';
 import { LogService } from './LogService.js';
+import { getPaneDisplayName } from '../utils/paneTitle.js';
 
 export interface StatusUpdateEvent {
   paneId: string;
@@ -71,6 +76,14 @@ export class StatusDetector extends EventEmitter {
       await this.handleAnalysisRequest(paneId, message);
     });
 
+    this.messageBus.subscribe('agent-turn-stopped', async (paneId, message) => {
+      await this.handleAgentTurnStopped(paneId, message);
+    });
+
+    this.messageBus.subscribe('codex-turn-stopped', async (paneId, message) => {
+      await this.handleAgentTurnStopped(paneId, message);
+    });
+
     // Handle worker errors (silently - don't log to console)
     this.messageBus.subscribe('error', (paneId, message) => {
       // Errors are internal - emit as events but don't log to console
@@ -107,6 +120,16 @@ export class StatusDetector extends EventEmitter {
 
     // Update workers based on current panes
     await this.workerManager.updateWorkers(panes);
+
+    const monitoredPaneIds = new Set(
+      panes.filter(shouldMonitorPaneForStatusTracking).map((pane) => pane.id)
+    );
+    for (const paneId of this.paneStatuses.keys()) {
+      if (!monitoredPaneIds.has(paneId)) {
+        this.paneStatuses.delete(paneId);
+        this.cancelLLMRequest(paneId, LLM_ABORT_REASON_SUPERSEDED);
+      }
+    }
   }
 
   /**
@@ -143,6 +166,64 @@ export class StatusDetector extends EventEmitter {
     }
 
     this.emit('status-updated', updateEvent);
+  }
+
+  private async handleAgentTurnStopped(
+    paneId: string,
+    message: OutboundMessage
+  ): Promise<void> {
+    const payload = (message.payload || {}) as AgentTurnStoppedPayload;
+    const captureSnapshot = payload.captureSnapshot || '';
+
+    this.cancelLLMRequest(paneId, LLM_ABORT_REASON_SUPERSEDED);
+
+    const tmuxPaneId = await this.getTmuxPaneId(paneId);
+    if (!tmuxPaneId) {
+      return;
+    }
+
+    const previousStatus = this.paneStatuses.get(paneId);
+    const finalStatus: AgentStatus = 'idle';
+    this.paneStatuses.set(paneId, finalStatus);
+
+    let summaryDetails: Pick<PaneAnalysis, 'summary' | 'attentionTitle' | 'attentionBody'> = {};
+    try {
+      const pane = StateManager.getInstance().getPaneById(paneId);
+      summaryDetails = await this.paneAnalyzer.extractSummary(
+        payload.lastAssistantMessage || captureSnapshot,
+        {
+          paneName: pane ? getPaneDisplayName(pane) : paneId,
+          panePrompt: pane?.prompt,
+          agentLabel: pane?.agent,
+        }
+      );
+    } catch (error) {
+      LogService.getInstance().debug(
+        `Agent stop hook summary extraction failed for pane ${paneId}: ${error instanceof Error ? error.message : String(error)}`,
+        'statusDetector',
+        paneId
+      );
+    }
+
+    const analysis: PaneAnalysis = {
+      state: 'open_prompt',
+      summary: summaryDetails.summary,
+      attentionTitle: summaryDetails.attentionTitle,
+      attentionBody: summaryDetails.attentionBody,
+    };
+
+    this.emit('status-updated', {
+      paneId,
+      status: finalStatus,
+      previousStatus,
+      summary: analysis.summary,
+      analyzerError: '',
+    } satisfies StatusUpdateEvent);
+
+    const attentionEvent = this.buildAttentionEvent(paneId, tmuxPaneId, finalStatus, analysis);
+    if (attentionEvent) {
+      this.emit('attention-needed', attentionEvent);
+    }
   }
 
   /**
@@ -184,7 +265,12 @@ export class StatusDetector extends EventEmitter {
         }
 
         // Run LLM analysis with abort signal (pass dmux pane ID for friendly logging)
-        const analysis = await this.paneAnalyzer.analyzePane(tmuxPaneId, controller.signal, paneId);
+        const analysis = await this.paneAnalyzer.analyzePane(
+          tmuxPaneId,
+          controller.signal,
+          paneId,
+          captureSnapshot
+        );
 
         // Clear the timeout since analysis completed
         clearTimeout(timeoutId);
@@ -282,15 +368,15 @@ export class StatusDetector extends EventEmitter {
       if (error.message) {
         // Clean up common API error patterns
         if (error.message.includes('API error')) {
-          // Extract model name and status from API errors
+          // Extract model name and status from provider API errors
           const match = error.message.match(/API error \(([^)]+)\): (\d+)/);
           if (match) {
             const [, model, status] = match;
             // Provide helpful messages for common status codes
             if (status === '401') {
-              errorMessage = `API auth failed - check OPENROUTER_API_KEY`;
+              errorMessage = `Inference authentication failed - check the provider key`;
             } else if (status === '402') {
-              errorMessage = `Insufficient credits - add credits to OpenRouter account`;
+              errorMessage = `Inference provider credits are exhausted`;
             } else if (status === '429') {
               errorMessage = `Rate limited - wait before retrying`;
             } else if (status === '503') {
@@ -301,10 +387,10 @@ export class StatusDetector extends EventEmitter {
           } else {
             errorMessage = error.message;
           }
-        } else if (error.message.includes('API key')) {
-          errorMessage = 'Set OPENROUTER_API_KEY env var';
-        } else if (error.message.includes('All models')) {
-          errorMessage = 'All models failed - check API key & credits';
+        } else if (error.message.includes('API key') || error.message.includes('Missing ')) {
+          errorMessage = 'Configure an inference provider key in settings';
+        } else if (error.message.includes('All inference targets')) {
+          errorMessage = 'Primary and backup inference targets failed';
         } else if (error.message.includes('fetch')) {
           errorMessage = 'Network error - check connection';
         } else {
@@ -359,7 +445,7 @@ export class StatusDetector extends EventEmitter {
     // Get pane data early for friendly naming in logs
     const stateManager = StateManager.getInstance();
     const pane = stateManager.getPaneById(paneId);
-    const paneName = pane?.slug || paneId;
+    const paneName = pane ? getPaneDisplayName(pane) : paneId;
 
     // Log entry into autopilot handler
     logService.debug(`Autopilot: Evaluating "${paneName}" (status: ${finalStatus}, state: ${analysis.state})`, 'autopilot', paneId);
@@ -442,7 +528,7 @@ export class StatusDetector extends EventEmitter {
     }
 
     const pane = StateManager.getInstance().getPaneById(paneId);
-    const subtitle = pane?.slug;
+    const subtitle = pane ? getPaneDisplayName(pane) : undefined;
 
     const title = analysis.attentionTitle
       || (status === 'waiting'

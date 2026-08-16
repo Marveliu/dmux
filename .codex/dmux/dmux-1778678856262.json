@@ -1,0 +1,15 @@
+{
+  "source": "codex-hook",
+  "dmuxPaneId": "dmux-1778678856262",
+  "tmuxPaneId": "%28",
+  "hookEventName": "Stop",
+  "turnId": "019e21f3-cb52-74b0-8574-53da97452c79",
+  "sessionId": "019e2185-908d-74d2-8b0d-7142bf7efd2b",
+  "toolName": "",
+  "approvalDescription": null,
+  "dmuxStatus": "idle",
+  "lastAssistantMessage": "Yes. The fix is aimed at exactly that pattern.\n\nWhat was happening: Claude/Codex goal mode can emit repeated Stop hook events while the goal is still active. dmux was treating those as “the agent is done” and sending attention, so it felt like a ping per tool cycle or mini-turn.\n\nWhat changed:\n\n- Claude and Codex Stop hook events are now normalized into a generic `agent-turn-stopped` path.\n- If the hook says `stop_hook_active` / `stopHookActive`, dmux treats it as continued work, not completion.\n- If recent pane output indicates an active goal, dmux also treats it as continued work.\n- Only the final non-continuation Stop event emits `attention-needed`.\n- While continuation is detected, the worker marks the pane as `working` instead of running completion analysis and notifying.\n\nThe key guard is in [PaneWorker.ts](/Users/justinschroeder/Projects/dmux/.dmux/worktrees/feat-5.8.0/src/workers/PaneWorker.ts:373), and the final notification only happens through [StatusDetector.ts](/Users/justinschroeder/Projects/dmux/.dmux/worktrees/feat-5.8.0/src/services/StatusDetector.ts:210).\n\nOne caveat: your last test may not have been exercising the intended path because the goal checkbox wasn’t actually defaulting on. With that fixed, new panes should launch in the goal-aware mode and suppress those intermediate pings.",
+  "transcriptPath": "/Users/justinschroeder/.codex/sessions/2026/05/13/rollout-2026-05-13T09-27-41-019e2185-908d-74d2-8b0d-7142bf7efd2b.jsonl",
+  "cwd": "/Users/justinschroeder/Projects/dmux/.dmux/worktrees/feat-5.8.0",
+  "timestamp": 1778686117677
+}

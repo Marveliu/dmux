@@ -43,6 +43,7 @@ vi.mock('../../src/shared/StateManager.js', () => ({
 
 vi.mock('../../src/utils/hooks.js', () => ({
   triggerHook: vi.fn().mockResolvedValue(undefined),
+  triggerHookSync: vi.fn().mockResolvedValue({ success: true }),
 }));
 
 vi.mock('../../src/services/LogService.js', () => ({
@@ -65,7 +66,7 @@ vi.mock('fs', () => {
 
 import { execSync } from 'child_process';
 import { StateManager } from '../../src/shared/StateManager.js';
-import { triggerHook } from '../../src/utils/hooks.js';
+import { triggerHook, triggerHookSync } from '../../src/utils/hooks.js';
 import fs from 'fs';
 
 describe('closeAction', () => {
@@ -91,10 +92,15 @@ describe('closeAction', () => {
       const mockPane = createShellPane({ paneId: '%99' });
       const mockContext = createMockContext([mockPane]);
 
-      // Mock must return the pane ID in list-panes so existence check passes
+      // Mock must return the pane ID before kill and omit it after kill.
+      let paneKilled = false;
       vi.mocked(execSync).mockImplementation((cmd: string) => {
         if (cmd.includes('list-panes')) {
-          return '%99\n'; // Pane exists
+          return paneKilled ? '' : '%99\n';
+        }
+        if (cmd.includes('kill-pane')) {
+          paneKilled = true;
+          return Buffer.from('');
         }
         return Buffer.from('');
       });
@@ -108,11 +114,11 @@ describe('closeAction', () => {
       );
       // Verify kill command was called after existence check passed
       expect(execSync).toHaveBeenCalledWith(
-        expect.stringContaining('tmux send-keys'),
+        expect.stringContaining('tmux kill-pane'),
         expect.anything()
       );
-      expect(execSync).toHaveBeenCalledWith(
-        expect.stringContaining('tmux kill-pane'),
+      expect(execSync).not.toHaveBeenCalledWith(
+        expect.stringContaining('tmux send-keys'),
         expect.anything()
       );
     });
@@ -210,6 +216,29 @@ describe('closeAction', () => {
       expect(onPaneRemoveSpy).toHaveBeenCalledWith('%42');
     });
 
+    it('should not treat pane ID prefixes as an existing pane', async () => {
+      const mockPane = createWorktreePane({ paneId: '%1' });
+      const mockContext = createMockContext([mockPane]);
+
+      vi.mocked(execSync).mockImplementation((cmd: string) => {
+        if (cmd.includes('list-panes')) {
+          return '%10\n';
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        controlPaneId: '%0',
+      }));
+
+      const result = await closePane(mockPane, mockContext);
+      await result.onSelect!('kill_only');
+
+      const killCalls = vi.mocked(execSync).mock.calls.filter(([cmd]) =>
+        typeof cmd === 'string' && cmd.includes('tmux kill-pane')
+      );
+      expect(killCalls).toHaveLength(0);
+    });
+
     it('should trigger before_pane_close and pane_closed hooks', async () => {
       const mockPane = createWorktreePane({ slug: 'test' });
       const mockContext = createMockContext([mockPane]);
@@ -268,6 +297,32 @@ describe('closeAction', () => {
       );
     });
 
+    it('should not remove pane state or cleanup worktree when tmux pane survives kill', async () => {
+      const mockPane = createWorktreePane({
+        paneId: '%42',
+        worktreePath: '/test/project/.dmux/worktrees/my-feature',
+      });
+      const mockContext = createMockContext([mockPane]);
+      const savePanesSpy = vi.spyOn(mockContext, 'savePanes');
+
+      vi.mocked(execSync).mockImplementation((cmd: string) => {
+        if (cmd.includes('list-panes')) {
+          return '%42\n%0\n';
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        controlPaneId: '%0',
+      }));
+
+      const result = await closePane(mockPane, mockContext);
+      const executeResult = await result.onSelect!('kill_and_clean');
+
+      expectError(executeResult, 'Failed to close pane');
+      expect(savePanesSpy).not.toHaveBeenCalled();
+      expect(mockEnqueueCleanup).not.toHaveBeenCalled();
+    });
+
     it('should trigger worktree removal hooks', async () => {
       const mockPane = createWorktreePane();
       const mockContext = createMockContext([mockPane]);
@@ -280,7 +335,40 @@ describe('closeAction', () => {
       const result = await closePane(mockPane, mockContext);
       await result.onSelect!('kill_and_clean');
 
-      expect(triggerHook).toHaveBeenCalledWith('before_worktree_remove', expect.anything(), mockPane);
+      expect(triggerHookSync).toHaveBeenCalledWith('before_worktree_remove', expect.anything(), mockPane);
+    });
+
+    // Regression test for https://github.com/standardagents/dmux/issues/63
+    // before_worktree_remove must block until the hook finishes, otherwise the
+    // worktree directory is deleted while the hook is still running.
+    it('should wait for before_worktree_remove hook to finish before enqueueing worktree cleanup', async () => {
+      const mockPane = createWorktreePane();
+      const mockContext = createMockContext([mockPane]);
+
+      vi.mocked(execSync).mockReturnValue(Buffer.from(''));
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        controlPaneId: '%0',
+      }));
+
+      // Record call ordering. Make the hook resolve on a later microtask so a
+      // fire-and-forget caller would observably enqueue cleanup before the
+      // hook finishes.
+      const order: string[] = [];
+      vi.mocked(triggerHookSync).mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        order.push('hook_done');
+        return { success: true };
+      });
+      mockEnqueueCleanup.mockImplementation(() => {
+        order.push('enqueue_cleanup');
+      });
+
+      const result = await closePane(mockPane, mockContext);
+      await result.onSelect!('kill_and_clean');
+
+      expect(triggerHookSync).toHaveBeenCalledWith('before_worktree_remove', expect.anything(), mockPane);
+      expect(mockEnqueueCleanup).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(['hook_done', 'enqueue_cleanup']);
     });
 
     it('should NOT delete branch when kill_and_clean selected', async () => {
@@ -321,6 +409,42 @@ describe('closeAction', () => {
 
       const cleanupJob = mockEnqueueCleanup.mock.calls.at(-1)?.[0];
       expect(cleanupJob?.deleteBranch).toBe(true);
+    });
+
+    it('should use the pane project root when deleting a sidebar project worktree', async () => {
+      const mockPane = createWorktreePane({
+        slug: 'project-b-feature',
+        projectRoot: '/test/project-b',
+        projectName: 'project-b',
+        worktreePath: '/test/project-b/.dmux/worktrees/project-b-feature',
+      });
+      const mockContext = createMockContext([mockPane]);
+
+      mockStateManager.getState.mockReturnValueOnce({
+        projectRoot: '/test/project-a',
+      });
+
+      vi.mocked(execSync).mockImplementation((cmd: string) => {
+        if (cmd.includes('list-panes')) {
+          return '%1\n';
+        }
+        return Buffer.from('');
+      });
+      vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({
+        controlPaneId: '%0',
+      }));
+
+      const result = await closePane(mockPane, mockContext);
+      await result.onSelect!('kill_clean_branch');
+
+      expect(mockEnqueueCleanup).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pane: mockPane,
+          paneProjectRoot: '/test/project-b',
+          mainRepoPath: '/test/project-b',
+          deleteBranch: true,
+        })
+      );
     });
   });
 

@@ -1,9 +1,13 @@
 import { parentPort, workerData } from 'worker_threads';
 import { randomUUID } from 'crypto';
+import * as fs from 'fs';
+import path from 'path';
 import { capturePaneContent } from '../utils/paneCapture.js';
 import { TmuxService } from '../services/TmuxService.js';
 import type { AgentName } from '../utils/agentLaunch.js';
 import {
+  buildPaneActivityFingerprint,
+  getAgentHookStatus,
   hasAgentWorkingIndicators,
   isLikelyUserTyping,
 } from '../utils/paneAttentionHeuristics.js';
@@ -13,22 +17,26 @@ import type {
   OutboundMessage,
   StatusChangePayload,
   AnalysisNeededPayload,
+  AgentTurnStoppedPayload,
   ErrorPayload,
   UserInteractionPayload,
 } from './WorkerMessages.js';
 
 class PaneWorker {
+  private static readonly CAPTURE_LINE_COUNT = 50;
   private static readonly USER_TYPING_SETTLE_MS = 3500;
   private static readonly AGENT_ACTIVITY_SETTLE_MS = 1500;
 
   private paneId: string;
   private tmuxPaneId: string;
   private agent?: AgentName;
-  private captureHistory: string[] = [];
+  private worktreePath?: string;
+  private captureHistory: Array<{ raw: string; fingerprint: string }> = [];
   private pollInterval: NodeJS.Timeout | null = null;
   private pollIntervalMs: number;
   private currentStatus: 'idle' | 'analyzing' | 'waiting' | 'working' = 'idle';
   private lastStaticContent: string = '';
+  private lastStaticFingerprint: string = '';
   private lastAnalysisTime: number = 0;
   private isShuttingDown: boolean = false;
   private settledStateConfirmed: boolean = false; // Block repeated LLM requests until activity resumes
@@ -36,13 +44,18 @@ class PaneWorker {
   private lastAgentActivityAt: number = 0;
   private awaitingAgentAfterUserInteraction: boolean = false;
   private statusBeforeAnalyzing: 'idle' | 'waiting' | 'working' = 'idle';
+  private agentStopEventFile?: string;
+  private lastAgentStopEventTimestamp = 0;
+  private lastAgentStopEventId = '';
   private tmux = TmuxService.getInstance();
 
   constructor(config: WorkerConfig) {
     this.paneId = config.paneId;
     this.tmuxPaneId = config.tmuxPaneId;
     this.agent = config.agent;
+    this.worktreePath = config.worktreePath;
     this.pollIntervalMs = config.pollInterval || 1000;
+    this.agentStopEventFile = this.resolveAgentStopEventFile();
 
     this.setupMessageHandler();
     this.startPolling();
@@ -101,21 +114,30 @@ class PaneWorker {
 
   private captureAndAnalyze(): void {
     try {
-      // Capture last 30 lines from tmux pane (skipping trailing blanks)
-      const output = capturePaneContent(this.tmuxPaneId, 30);
+      // Capture a stable slice of recent pane history for both activity detection
+      // and downstream analysis.
+      const output = capturePaneContent(this.tmuxPaneId, PaneWorker.CAPTURE_LINE_COUNT);
+      const activityFingerprint = buildPaneActivityFingerprint(output);
       const now = Date.now();
+
+      if (this.maybeHandleAgentTurnStopped(output, activityFingerprint)) {
+        return;
+      }
 
       const lines = output.split('\n');
       const recentLines = lines.slice(-20).join('\n');
       const hasWorkingState = hasAgentWorkingIndicators(recentLines, this.agent);
 
       if (hasWorkingState) {
-        this.markAgentActive(output, now);
+        this.markAgentActive(output, activityFingerprint, now);
         return;
       }
 
       // Add to rolling history
-      this.captureHistory.push(output);
+      this.captureHistory.push({
+        raw: output,
+        fingerprint: activityFingerprint,
+      });
       if (this.captureHistory.length > 5) {
         this.captureHistory.shift();
       }
@@ -127,20 +149,22 @@ class PaneWorker {
 
       // Check for activity (any changes in captures)
       const hasActivity = !this.captureHistory.every(
-        capture => capture === this.captureHistory[0]
+        capture => capture.fingerprint === this.captureHistory[0]?.fingerprint
       );
 
       if (hasActivity) {
-        const previousCapture = this.captureHistory[this.captureHistory.length - 2] || '';
+        const previousCapture = this.captureHistory[this.captureHistory.length - 2]?.raw || '';
         if (isLikelyUserTyping(previousCapture, output)) {
-          this.handleUserInteraction(output, now);
+          this.handleUserInteraction(output, activityFingerprint, now);
           return;
         }
 
-        this.markAgentActive(output, now);
+        this.markAgentActive(output, activityFingerprint, now);
       } else {
         // Terminal is static - determine what kind
-        const staticContent = this.captureHistory[this.captureHistory.length - 1];
+        const staticCapture = this.captureHistory[this.captureHistory.length - 1];
+        const staticContent = staticCapture?.raw || '';
+        const staticFingerprint = staticCapture?.fingerprint || '';
         if (now - this.lastUserInteractionAt < PaneWorker.USER_TYPING_SETTLE_MS) {
           return;
         }
@@ -154,8 +178,9 @@ class PaneWorker {
         }
 
         // Check if this is new static content
-        if (staticContent !== this.lastStaticContent) {
+        if (staticFingerprint !== this.lastStaticFingerprint) {
           this.lastStaticContent = staticContent;
+          this.lastStaticFingerprint = staticFingerprint;
 
           if (this.settledStateConfirmed) {
             return;
@@ -187,25 +212,27 @@ class PaneWorker {
     }
   }
 
-  private markAgentActive(output: string, at: number): void {
+  private markAgentActive(output: string, fingerprint: string, at: number): void {
     this.awaitingAgentAfterUserInteraction = false;
     this.settledStateConfirmed = false;
     this.lastAgentActivityAt = at;
     this.lastStaticContent = '';
+    this.lastStaticFingerprint = '';
 
     if (this.currentStatus !== 'working') {
       this.updateStatus('working');
     }
 
-    this.captureHistory = [output];
+    this.captureHistory = [{ raw: output, fingerprint }];
   }
 
-  private handleUserInteraction(output: string, at: number): void {
+  private handleUserInteraction(output: string, fingerprint: string, at: number): void {
     this.lastUserInteractionAt = at;
     this.awaitingAgentAfterUserInteraction = true;
     this.settledStateConfirmed = false;
     this.lastStaticContent = output;
-    this.captureHistory = [output];
+    this.lastStaticFingerprint = fingerprint;
+    this.captureHistory = [{ raw: output, fingerprint }];
 
     if (this.currentStatus === 'analyzing') {
       this.updateStatus(this.statusBeforeAnalyzing);
@@ -221,7 +248,7 @@ class PaneWorker {
     const payload: StatusChangePayload = {
       status: newStatus,
       previousStatus,
-      captureSnapshot: this.captureHistory[this.captureHistory.length - 1]
+      captureSnapshot: this.captureHistory[this.captureHistory.length - 1]?.raw
     };
 
     this.emit('status-change', payload);
@@ -247,6 +274,133 @@ class PaneWorker {
       : this.currentStatus;
     this.updateStatus('analyzing');
     this.requestAnalysis(content, reason);
+  }
+
+  private resolveAgentStopEventFile(): string | undefined {
+    if (!this.worktreePath) {
+      return undefined;
+    }
+
+    if (this.agent === 'codex') {
+      return path.join(this.worktreePath, '.codex', 'dmux', `${this.paneId}.json`);
+    }
+
+    if (this.agent === 'claude') {
+      return path.join(this.worktreePath, '.claude', 'dmux', `${this.paneId}.json`);
+    }
+
+    if (this.agent === 'grok') {
+      return path.join(this.worktreePath, '.grok', 'dmux', `${this.paneId}.json`);
+    }
+
+    return undefined;
+  }
+
+  private maybeHandleAgentTurnStopped(output: string, fingerprint: string): boolean {
+    if (!this.agentStopEventFile) {
+      return false;
+    }
+
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.agentStopEventFile, 'utf-8');
+    } catch {
+      return false;
+    }
+
+    let event: any;
+    try {
+      event = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+
+    const timestamp = Number(event.timestamp || 0);
+    const turnId = typeof event.turnId === 'string' ? event.turnId : '';
+    const sessionId = typeof event.sessionId === 'string' ? event.sessionId : '';
+    const eventId = turnId || (sessionId ? `${sessionId}:${timestamp}` : '');
+    if (!timestamp || timestamp < this.lastAgentStopEventTimestamp) {
+      return false;
+    }
+
+    if (timestamp === this.lastAgentStopEventTimestamp && eventId === this.lastAgentStopEventId) {
+      return false;
+    }
+
+    if (event.dmuxPaneId !== this.paneId) {
+      return false;
+    }
+
+    if (event.tmuxPaneId && event.tmuxPaneId !== this.tmuxPaneId) {
+      return false;
+    }
+
+    this.lastAgentStopEventTimestamp = timestamp;
+    this.lastAgentStopEventId = eventId;
+
+    const eventStatus = getAgentHookStatus(event);
+    if (!eventStatus) {
+      return false;
+    }
+
+    if (eventStatus === 'working' || this.isGoalContinuationEvent(event, output)) {
+      this.markAgentActive(output, fingerprint, Date.now());
+      return true;
+    }
+
+    this.awaitingAgentAfterUserInteraction = false;
+    this.settledStateConfirmed = eventStatus === 'idle' || eventStatus === 'waiting';
+    this.lastStaticContent = output;
+    this.lastStaticFingerprint = fingerprint;
+    this.captureHistory = [{ raw: output, fingerprint }];
+
+    const previousStatus = this.currentStatus;
+    this.currentStatus = eventStatus;
+    this.emit('status-change', {
+      status: eventStatus,
+      previousStatus,
+      captureSnapshot: output,
+    });
+
+    if (eventStatus !== 'idle') {
+      return true;
+    }
+
+    const payload: AgentTurnStoppedPayload = {
+      captureSnapshot: output,
+      agent: this.agent,
+      eventFile: this.agentStopEventFile,
+      source: typeof event.source === 'string' ? event.source : 'agent-stop-hook',
+      stopHookActive: false,
+    };
+
+    if (turnId) {
+      payload.turnId = turnId;
+    }
+    if (typeof event.lastAssistantMessage === 'string' && event.lastAssistantMessage.trim()) {
+      payload.lastAssistantMessage = event.lastAssistantMessage;
+    }
+
+    this.emit('agent-turn-stopped', payload);
+    return true;
+  }
+
+  private isGoalContinuationEvent(event: any, output: string): boolean {
+    if (event.stopHookActive === true || event.stop_hook_active === true) {
+      return true;
+    }
+
+    if (this.agent !== 'claude' && this.agent !== 'codex') {
+      return false;
+    }
+
+    const recentOutput = output.split('\n').slice(-20).join('\n');
+    return (
+      /\/goal\s+active/i.test(recentOutput)
+      || /\bgoal\s+active\b/i.test(recentOutput)
+      || /\bactive\s+goal\b/i.test(recentOutput)
+      || /\bgoal\s+is\s+active\b/i.test(recentOutput)
+    );
   }
 
   private handleAnalysisComplete(payload: any): void {
@@ -285,7 +439,8 @@ class PaneWorker {
 
     // Clear history after sending keys as state will change
     this.captureHistory = [];
-    this.handleUserInteraction('', Date.now());
+    this.lastStaticFingerprint = '';
+    this.handleUserInteraction('', '', Date.now());
   }
 
   private async resizePane(width?: number, height?: number): Promise<void> {

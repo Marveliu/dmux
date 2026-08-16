@@ -5,6 +5,7 @@ import { join } from 'path';
 import {
   buildOpenRouterExportLine,
   getShellConfigCandidates,
+  hasCompletedInferenceProviderOnboarding,
   hasCompletedOpenRouterOnboarding,
   persistOpenRouterApiKeyToShell,
   readOnboardingState,
@@ -95,6 +96,7 @@ describe('openRouterApiKeySetup', () => {
       expect(state.tmuxConfigOnboarding).toBeDefined();
       expect(state.openRouterApiKeyOnboarding).toBeDefined();
       expect(await hasCompletedOpenRouterOnboarding(homeDir)).toBe(true);
+      expect(await hasCompletedInferenceProviderOnboarding(homeDir)).toBe(true);
     } finally {
       rmSync(homeDir, { recursive: true, force: true });
     }

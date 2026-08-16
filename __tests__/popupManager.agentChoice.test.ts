@@ -15,7 +15,7 @@ function createPopupManager(
     terminalHeight: 40,
     availableAgents,
     settingsManager: {
-      getSettings: () => ({ defaultAgent }),
+      getSettings: () => ({ defaultAgent, enabledAgents: availableAgents }),
       getGlobalSettings: () => ({}),
       getProjectSettings: () => ({}),
     },
@@ -49,7 +49,7 @@ describe('PopupManager launchAgentChoicePopup', () => {
     );
   });
 
-  it('passes an empty initial selection when configured default is unavailable', async () => {
+  it('uses the first available agent as the initial selection when configured default is unavailable', async () => {
     const manager = createPopupManager(['claude', 'opencode'], 'codex') as any;
     manager.checkPopupSupport = vi.fn(() => true);
     manager.launchPopup = vi.fn().mockResolvedValue({
@@ -61,10 +61,37 @@ describe('PopupManager launchAgentChoicePopup', () => {
 
     expect(manager.launchPopup).toHaveBeenCalledWith(
       'agentChoicePopup.js',
-      [JSON.stringify(['claude', 'opencode']), JSON.stringify([])],
+      [JSON.stringify(['claude', 'opencode']), JSON.stringify(['claude'])],
       expect.any(Object),
       undefined,
       undefined
+    );
+  });
+
+  it('uses the selected project settings when opening another project', async () => {
+    const manager = createPopupManager(['claude'], 'claude') as any;
+    manager.checkPopupSupport = vi.fn(() => true);
+    manager.getAvailableAgents = vi.fn((projectRoot?: string) =>
+      projectRoot === '/tmp/other-project' ? ['codex'] : ['claude']
+    );
+    manager.getSettingsManager = vi.fn((projectRoot?: string) => ({
+      getSettings: () => ({
+        defaultAgent: projectRoot === '/tmp/other-project' ? 'codex' : 'claude',
+      }),
+    }));
+    manager.launchPopup = vi.fn().mockResolvedValue({
+      success: true,
+      data: ['codex'],
+    });
+
+    await manager.launchAgentChoicePopup('/tmp/other-project');
+
+    expect(manager.launchPopup).toHaveBeenCalledWith(
+      'agentChoicePopup.js',
+      [JSON.stringify(['codex']), JSON.stringify(['codex'])],
+      expect.any(Object),
+      undefined,
+      '/tmp/other-project'
     );
   });
 });

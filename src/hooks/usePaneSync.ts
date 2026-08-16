@@ -1,18 +1,20 @@
 import fs from 'fs/promises';
+import path from 'path';
 import type { DmuxPane } from '../types.js';
 import { rebindPaneByTitle } from '../utils/paneRebinding.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { PaneLifecycleManager } from '../services/PaneLifecycleManager.js';
-import { TMUX_COMMAND_TIMEOUT } from '../constants/timing.js';
 import type { DmuxConfig } from './usePaneLoading.js';
 import { atomicWriteJson } from '../utils/atomicWrite.js';
 import { getPaneTmuxTitle } from '../utils/paneTitle.js';
 import { StateManager } from '../shared/StateManager.js';
+import { normalizeSidebarProjects } from '../utils/sidebarProjects.js';
+import { syncPaneColorThemes } from '../utils/paneColors.js';
 
 /**
- * Enforces that pane titles in tmux match the slugs in the config
- * This ensures dmux config is the source of truth for pane names
+ * Enforces that tmux pane titles match the encoded config title for each pane.
+ * This keeps rebinding stable while allowing a separate user-facing display name.
  */
 export async function enforcePaneTitles(
   panes: DmuxPane[],
@@ -127,32 +129,43 @@ export async function savePanesToFile(
     } catch {}
 
     // Save in config format (use atomic write to prevent race conditions)
-    config.panes = activePanes;
+    const projectRoot = config.projectRoot || path.dirname(path.dirname(panesFile));
+    const projectName = config.projectName || path.basename(projectRoot);
+    const normalizedSidebarProjects = normalizeSidebarProjects(
+      config.sidebarProjects,
+      activePanes,
+      projectRoot,
+      projectName
+    );
+    config.sidebarProjects = normalizedSidebarProjects;
+    config.panes = syncPaneColorThemes(
+      activePanes,
+      normalizedSidebarProjects,
+      projectRoot
+    );
     config.lastUpdated = new Date().toISOString();
     await atomicWriteJson(panesFile, config);
 
-    return activePanes;
+    return config.panes;
   });
 }
 
 /**
- * Rebinds all panes and filters out dead shell panes
- * Keeps worktree panes even if not found (they can be recreated)
+ * Rebinds all panes and queues missing durable panes for recreation.
  *
  * IMPORTANT: Checks PaneLifecycleManager to avoid queuing panes for recreation
  * if they are being intentionally closed (prevents race condition)
  *
- * CRITICAL FIX: On initial load, shell panes with stale IDs are immediately removed.
- * Shell panes cannot be recreated (they have no worktreePath), so keeping them
- * with stale IDs causes dmux to hang when trying to interact with non-existent panes.
+ * Regular terminals and worktree panes are both durable. Intentional close actions
+ * remove config first and are guarded by PaneLifecycleManager.
  */
 export function rebindAndFilterPanes(
   loadedPanes: DmuxPane[],
   titleToId: Map<string, string>,
   allPaneIds: string[],
   isInitialLoad: boolean
-): { activePanes: DmuxPane[]; shellPanesRemoved: boolean; worktreePanesToRecreate: DmuxPane[] } {
-  const worktreePanesToRecreate: DmuxPane[] = [];
+): { activePanes: DmuxPane[]; panesToRecreate: DmuxPane[] } {
+  const panesToRecreate: DmuxPane[] = [];
   const lifecycleManager = PaneLifecycleManager.getInstance();
 
   // LogService.getInstance().debug(
@@ -172,7 +185,7 @@ export function rebindAndFilterPanes(
     return rebound;
   });
 
-  // Filter out dead shell panes, keep worktree panes
+  // Keep durable panes and queue missing panes for recreation after initial load.
   const activePanes = reboundPanes.filter(pane => {
     // If we have tmux data and this pane is not found
     if (allPaneIds.length > 0 && !allPaneIds.includes(pane.paneId)) {
@@ -191,53 +204,26 @@ export function rebindAndFilterPanes(
         'shellDetection'
       );
 
-      // CRITICAL FIX: Remove shell panes that are no longer present
-      // Shell panes have no worktreePath, so they cannot be recreated.
-      // Keeping them with stale paneIds causes dmux to hang when:
-      // 1. Trying to send keys to non-existent panes
-      // 2. Trying to get pane status/content
-      // 3. Trying to apply layouts with stale pane IDs
-      // This is especially important on session reopen where tmux pane IDs change.
-      if (pane.type === 'shell') {
-        LogService.getInstance().info(
-          `Removing stale shell pane: ${pane.id} (${pane.slug}) - paneId ${pane.paneId} no longer exists`,
-          'shellDetection'
-        );
-        return false;
-      }
-
-      // For worktree panes after initial load, queue them for recreation
-      if (!isInitialLoad && pane.worktreePath) {
+      // After initial load, queue any restorable pane for recreation.
+      if (!isInitialLoad && (pane.type === 'shell' || pane.worktreePath)) {
         LogService.getInstance().debug(
-          `Worktree pane ${pane.id} (${pane.slug}) was killed, will recreate it`,
+          `Pane ${pane.id} (${pane.slug}) was killed, will recreate it`,
           'shellDetection'
         );
-        worktreePanesToRecreate.push(pane);
+        panesToRecreate.push(pane);
         return true; // Keep it in the list
       }
 
-      // Keep worktree panes (they can be recreated on restart)
+      // Keep durable panes during initial reconciliation.
       LogService.getInstance().debug(
-        `Keeping worktree pane: ${pane.id} (will be recreated if needed)`,
+        `Keeping pane: ${pane.id} (will be recreated if needed)`,
         'shellDetection'
       );
     }
     return true;
   });
 
-  // Track if shell panes were removed (for saving to config)
-  const shellPanesRemoved = loadedPanes.some(p =>
-    p.type === 'shell' && allPaneIds.length > 0 && !allPaneIds.includes(p.paneId)
-  );
-
-  if (shellPanesRemoved) {
-    LogService.getInstance().info(
-      `Removed ${loadedPanes.filter(p => p.type === 'shell' && !allPaneIds.includes(p.paneId)).length} stale shell pane(s) from config`,
-      'shellDetection'
-    );
-  }
-
-  return { activePanes, shellPanesRemoved, worktreePanesToRecreate };
+  return { activePanes, panesToRecreate };
 }
 
 /**
@@ -260,7 +246,20 @@ export async function saveUpdatedPaneConfig(
     } catch {}
 
     // Update with remapped panes
-    currentConfig.panes = activePanes;
+    const projectRoot = currentConfig.projectRoot || path.dirname(path.dirname(panesFile));
+    const projectName = currentConfig.projectName || path.basename(projectRoot);
+    const normalizedSidebarProjects = normalizeSidebarProjects(
+      currentConfig.sidebarProjects,
+      activePanes,
+      projectRoot,
+      projectName
+    );
+    currentConfig.sidebarProjects = normalizedSidebarProjects;
+    currentConfig.panes = syncPaneColorThemes(
+      activePanes,
+      normalizedSidebarProjects,
+      projectRoot
+    );
     currentConfig.lastUpdated = new Date().toISOString();
     LogService.getInstance().debug(
       `Writing config with ${currentConfig.panes.length} panes`,

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Box, Text, useInput, useFocus, useStdout } from 'ink';
-import { wrapText, findCursorInWrappedLines, preprocessPastedContent } from '../../utils/input.js';
+import stringWidth from 'string-width';
+import { wrapText, findCursorInWrappedLines, findCharIndexAtWidth, preprocessPastedContent } from '../../utils/input.js';
 
 interface CleanTextInputProps {
   value: string;
@@ -16,6 +17,7 @@ interface CleanTextInputProps {
   disableEscape?: boolean; // Disable ESC key (for external controls)
   ignoreFocus?: boolean; // Always accept input regardless of focus state
   onCancel?: () => void; // Callback when Ctrl+C is pressed with empty input
+  disabled?: boolean; // Fully ignore input (parent handles all keystrokes)
 }
 
 interface PastedContent {
@@ -38,7 +40,8 @@ const CleanTextInput: React.FC<CleanTextInputProps> = ({
   onCursorChange,
   disableEscape = false,
   ignoreFocus = false,
-  onCancel
+  onCancel,
+  disabled = false
 }) => {
   // Use id to maintain focus even when other components mount/unmount
   const { isFocused } = useFocus({ autoFocus: true, id: 'clean-text-input' });
@@ -247,7 +250,16 @@ const CleanTextInput: React.FC<CleanTextInputProps> = ({
   };
 
   useInput((input, key) => {
+    if (disabled) {
+      return;
+    }
+
     if (!isFocused && !ignoreFocus) {
+      return;
+    }
+
+    // Let parent handle Tab navigation between focus zones.
+    if (key.tab) {
       return;
     }
 
@@ -315,12 +327,7 @@ const CleanTextInput: React.FC<CleanTextInputProps> = ({
       // Find absolute position of start of current visual line
       let absolutePos = 0;
       for (let i = 0; i < currentPos.line; i++) {
-        absolutePos += wrapped[i].line.length;
-        if (!wrapped[i].isHardBreak && i < wrapped.length - 1) {
-          absolutePos++; // Space between wrapped segments
-        } else if (wrapped[i].isHardBreak) {
-          absolutePos++; // Newline character
-        }
+        absolutePos += wrapped[i]!.line.length + wrapped[i]!.gapSize;
       }
       setCursor(absolutePos);
       return;
@@ -334,16 +341,17 @@ const CleanTextInput: React.FC<CleanTextInputProps> = ({
       // Find absolute position of end of current visual line
       let absolutePos = 0;
       for (let i = 0; i <= currentPos.line; i++) {
-        if (i === currentPos.line) {
-          absolutePos += wrapped[i].line.length;
-        } else {
-          absolutePos += wrapped[i].line.length;
-          if (!wrapped[i].isHardBreak && i < wrapped.length - 1) {
-            absolutePos++; // Space between wrapped segments
-          } else if (wrapped[i].isHardBreak) {
-            absolutePos++; // Newline character
-          }
+        absolutePos += wrapped[i]!.line.length;
+        if (i < currentPos.line) {
+          absolutePos += wrapped[i]!.gapSize;
         }
+      }
+      // For forced breaks (gapSize=0, not last line), cursor at lineLength
+      // would map to the next line. Stay on the last character instead.
+      const currentWrapped = wrapped[currentPos.line]!;
+      const isLastLine = currentPos.line === wrapped.length - 1;
+      if (currentWrapped.gapSize === 0 && !isLastLine && currentWrapped.line.length > 0) {
+        absolutePos -= 1;
       }
       setCursor(Math.min(absolutePos, value.length));
       return;
@@ -367,41 +375,43 @@ const CleanTextInput: React.FC<CleanTextInputProps> = ({
       const wrapped = wrapText(value, maxWidth);
       const currentPos = findCursorInWrappedLines(wrapped, cursor);
       
+      // Use display width for column tracking so mixed-width text
+      // (CJK + ASCII) maintains the correct visual column position.
+      const currentVisualCol = stringWidth(wrapped[currentPos.line]!.line.slice(0, currentPos.col));
+      
       if (key.upArrow && currentPos.line > 0) {
         // Move up one visual line
         const targetLine = currentPos.line - 1;
-        const targetCol = Math.min(currentPos.col, wrapped[targetLine].line.length);
+        const targetWrapped = wrapped[targetLine]!;
+        let targetCol = findCharIndexAtWidth(targetWrapped.line, currentVisualCol);
+        // Cap for forced-break lines to stay on this line
+        const isTargetLastLine = targetLine === wrapped.length - 1;
+        if (targetWrapped.gapSize === 0 && !isTargetLastLine) {
+          targetCol = Math.min(targetCol, Math.max(0, targetWrapped.line.length - 1));
+        }
         
         // Convert back to absolute position
         let absolutePos = 0;
         for (let i = 0; i < targetLine; i++) {
-          absolutePos += wrapped[i].line.length;
-          // Add space if this was a soft wrap
-          if (!wrapped[i].isHardBreak && i < wrapped.length - 1) {
-            const nextLineExists = i + 1 < wrapped.length;
-            if (nextLineExists) absolutePos++; // Space between wrapped segments
-          } else if (wrapped[i].isHardBreak) {
-            absolutePos++; // Newline character
-          }
+          absolutePos += wrapped[i]!.line.length + wrapped[i]!.gapSize;
         }
         absolutePos += targetCol;
         setCursor(Math.min(absolutePos, value.length));
       } else if (key.downArrow && currentPos.line < wrapped.length - 1) {
         // Move down one visual line
         const targetLine = currentPos.line + 1;
-        const targetCol = Math.min(currentPos.col, wrapped[targetLine].line.length);
+        const targetWrapped = wrapped[targetLine]!;
+        let targetCol = findCharIndexAtWidth(targetWrapped.line, currentVisualCol);
+        // Cap for forced-break lines to stay on this line
+        const isTargetLastLine = targetLine === wrapped.length - 1;
+        if (targetWrapped.gapSize === 0 && !isTargetLastLine) {
+          targetCol = Math.min(targetCol, Math.max(0, targetWrapped.line.length - 1));
+        }
         
         // Convert back to absolute position
         let absolutePos = 0;
         for (let i = 0; i < targetLine; i++) {
-          absolutePos += wrapped[i].line.length;
-          // Add space if this was a soft wrap
-          if (!wrapped[i].isHardBreak && i < wrapped.length - 1) {
-            const nextLineExists = i + 1 < wrapped.length;
-            if (nextLineExists) absolutePos++; // Space between wrapped segments
-          } else if (wrapped[i].isHardBreak) {
-            absolutePos++; // Newline character
-          }
+          absolutePos += wrapped[i]!.line.length + wrapped[i]!.gapSize;
         }
         absolutePos += targetCol;
         setCursor(Math.min(absolutePos, value.length));

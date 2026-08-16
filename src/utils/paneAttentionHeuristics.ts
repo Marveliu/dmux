@@ -1,5 +1,7 @@
 import type { AgentName } from './agentLaunch.js';
 
+export type AgentHookStatus = 'idle' | 'waiting' | 'working';
+
 const GENERIC_PROGRESS_WORDS = [
   'working',
   'thinking',
@@ -38,10 +40,75 @@ const PROMPT_PATTERNS = [
   /^\s*❯\s*\S/,
   /^\s*›\s*\S/,
   /^\s*│\s*>\s*\S/,
+  /^\s*│\s*\$\s*\S/,
+  /^\s*│\s*❯\s*\S/,
+  /^\s*│\s*›\s*\S/,
   /^\s*>\s*$/,
+  /^\s*\$\s*$/,
   /^\s*❯\s*$/,
+  /^\s*›\s*$/,
   /^\s*│\s*>\s*$/,
+  /^\s*│\s*\$\s*$/,
+  /^\s*│\s*❯\s*$/,
+  /^\s*│\s*›\s*$/,
 ];
+const PROMPT_CONTINUATION_PATTERNS = [
+  /^\s{2,}\S/,
+  /^\s*│\s{2,}\S/,
+];
+
+function stringField(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+export function getAgentHookStatus(event: unknown): AgentHookStatus | null {
+  if (!event || typeof event !== 'object') {
+    return null;
+  }
+
+  const record = event as Record<string, unknown>;
+  const explicitStatus = stringField(record.dmuxStatus);
+  if (explicitStatus === 'idle' || explicitStatus === 'waiting' || explicitStatus === 'working') {
+    return explicitStatus;
+  }
+
+  const hookEventName = stringField(record.hookEventName)
+    || stringField(record.hook_event_name);
+
+  if (!hookEventName) {
+    return 'idle';
+  }
+
+  switch (hookEventName) {
+    case 'Stop':
+    case 'SubagentStop':
+      return 'idle';
+    case 'Notification':
+    case 'PermissionRequest':
+      return 'waiting';
+    case 'UserPromptSubmit':
+    case 'PreToolUse':
+    case 'PostToolUse':
+      return 'working';
+    default:
+      return null;
+  }
+}
+
+function trimSurroundingEmptyLines(lines: string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+
+  while (start < end && lines[start]?.trim() === '') {
+    start += 1;
+  }
+
+  while (end > start && lines[end - 1]?.trim() === '') {
+    end -= 1;
+  }
+
+  return lines.slice(start, end);
+}
 
 function recentRelevantLines(content: string, maxLines: number = 8): string[] {
   return content
@@ -62,6 +129,66 @@ function commonPrefixLength(left: string, right: string): number {
 
 function looksLikePromptLine(line: string): boolean {
   return PROMPT_PATTERNS.some((pattern) => pattern.test(line));
+}
+
+function looksLikePromptContinuationLine(line: string): boolean {
+  return PROMPT_CONTINUATION_PATTERNS.some((pattern) => pattern.test(line));
+}
+
+function normalizeLinesForComparison(lines: string[]): string {
+  return trimSurroundingEmptyLines(lines)
+    .map((line) => line.trimEnd())
+    .join('\n');
+}
+
+function normalizePromptBlock(lines: string[]): string {
+  return lines
+    .map((line) => line.replace(/^\s*│\s*/, ''))
+    .map((line) => line.replace(/^(?:[>$❯›])\s?/, ''))
+    .map((line) => line.replace(/^\s{2,}/, ''))
+    .map((line) => line.trimEnd())
+    .join('\n');
+}
+
+function extractTrailingPromptBlock(
+  content: string
+): { prefixLines: string[]; promptLines: string[] } | null {
+  const lines = trimSurroundingEmptyLines(content.split('\n'));
+  if (lines.length === 0) {
+    return null;
+  }
+
+  const searchStart = Math.max(0, lines.length - 12);
+  for (let index = lines.length - 1; index >= searchStart; index -= 1) {
+    if (!looksLikePromptLine(lines[index])) {
+      continue;
+    }
+
+    const trailingLines = lines.slice(index + 1);
+    if (trailingLines.every((line) => looksLikePromptContinuationLine(line))) {
+      return {
+        prefixLines: lines.slice(0, index),
+        promptLines: lines.slice(index),
+      };
+    }
+  }
+
+  return null;
+}
+
+export function buildPaneActivityFingerprint(
+  content: string,
+  maxLines: number = 12
+): string {
+  const lines = trimSurroundingEmptyLines(content.split('\n'));
+  if (lines.length === 0) {
+    return '';
+  }
+
+  return lines
+    .slice(-maxLines)
+    .map((line) => line.trimEnd())
+    .join('\n');
 }
 
 export function hasAgentWorkingIndicators(content: string, agent?: AgentName): boolean {
@@ -101,6 +228,7 @@ export function hasAgentWorkingIndicators(content: string, agent?: AgentName): b
       );
     case 'opencode':
     case 'codex':
+    case 'grok':
     case 'gemini':
     case 'qwen':
     case 'cursor':
@@ -120,9 +248,28 @@ export function isLikelyUserTyping(previousContent: string, currentContent: stri
     return false;
   }
 
+  const previousPromptBlock = extractTrailingPromptBlock(previousContent);
+  const currentPromptBlock = extractTrailingPromptBlock(currentContent);
+  if (previousPromptBlock || currentPromptBlock) {
+    const previousPrefix = normalizeLinesForComparison(
+      previousPromptBlock ? previousPromptBlock.prefixLines : previousContent.split('\n')
+    );
+    const currentPrefix = normalizeLinesForComparison(
+      currentPromptBlock ? currentPromptBlock.prefixLines : currentContent.split('\n')
+    );
+
+    if (previousPrefix === currentPrefix) {
+      const previousPrompt = normalizePromptBlock(previousPromptBlock?.promptLines || []);
+      const currentPrompt = normalizePromptBlock(currentPromptBlock?.promptLines || []);
+      if (previousPrompt !== currentPrompt) {
+        return true;
+      }
+    }
+  }
+
   const previousLines = previousContent.split('\n');
   const currentLines = currentContent.split('\n');
-  if (Math.abs(currentLines.length - previousLines.length) > 2) {
+  if (Math.abs(currentLines.length - previousLines.length) > 6) {
     return false;
   }
 
@@ -135,11 +282,11 @@ export function isLikelyUserTyping(previousContent: string, currentContent: stri
     }
   }
 
-  if (changedIndices.length === 0 || changedIndices.length > 3) {
+  if (changedIndices.length === 0 || changedIndices.length > 6) {
     return false;
   }
 
-  const bottomThreshold = maxLength - 4;
+  const bottomThreshold = maxLength - 6;
   if (changedIndices.some((index) => index < bottomThreshold)) {
     return false;
   }
@@ -147,22 +294,19 @@ export function isLikelyUserTyping(previousContent: string, currentContent: stri
   return changedIndices.some((index) => {
     const previousLine = previousLines[index] || '';
     const currentLine = currentLines[index] || '';
-    const delta = Math.abs(currentLine.length - previousLine.length);
     const prefixLength = commonPrefixLength(previousLine, currentLine);
     const maxLengthForLine = Math.max(previousLine.length, currentLine.length);
     const mostlySharedPrefix = maxLengthForLine > 0 && prefixLength / maxLengthForLine >= 0.7;
-
-    if (delta > 32) {
-      return false;
-    }
+    const promptLike = looksLikePromptLine(currentLine || previousLine)
+      || looksLikePromptContinuationLine(currentLine || previousLine);
 
     if (
       (currentLine.startsWith(previousLine) || previousLine.startsWith(currentLine))
-      && looksLikePromptLine(currentLine || previousLine)
+      && promptLike
     ) {
       return true;
     }
 
-    return mostlySharedPrefix && looksLikePromptLine(currentLine || previousLine);
+    return mostlySharedPrefix && promptLike;
   });
 }

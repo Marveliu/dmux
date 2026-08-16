@@ -2,6 +2,7 @@ import path from 'path';
 import * as fs from 'fs';
 import { TmuxService } from '../services/TmuxService.js';
 import {
+  ensurePaneBorderStatusForCurrentSession,
   setupSidebarLayout,
   getTerminalDimensions,
   splitPane,
@@ -12,8 +13,8 @@ import { atomicWriteJsonSync } from './atomicWrite.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
 import {
   AGENT_IDS,
-  buildAgentCommand,
-  buildResumeCommand,
+  buildAgentResumeOrLaunchCommand,
+  shouldEnableCodexGoals,
   type AgentName,
 } from './agentLaunch.js';
 import { ensureGeminiFolderTrusted } from './geminiTrust.js';
@@ -21,8 +22,17 @@ import { SettingsManager } from './settingsManager.js';
 import { filterEnabledAgents, getInstalledAgents } from './agentDetection.js';
 import { getCurrentBranch } from './git.js';
 import { readWorktreeMetadata } from './worktreeMetadata.js';
+import {
+  buildCodexHookedCommand,
+  installCodexPaneHooks,
+} from './codexHooks.js';
+import { installClaudePaneHooks } from './claudeHooks.js';
+import { installGrokPaneHooks } from './grokHooks.js';
+import { resolveProjectColorTheme } from './paneColors.js';
+import type { SidebarProject } from '../types.js';
 
 export interface ReopenWorktreeOptions {
+  agent?: AgentName;
   slug: string;
   worktreePath: string;
   projectRoot: string; // Target repo root for the reopened pane
@@ -43,6 +53,7 @@ export async function reopenWorktree(
   options: ReopenWorktreeOptions
 ): Promise<ReopenWorktreeResult> {
   const {
+    agent: requestedAgent,
     slug,
     worktreePath,
     projectRoot,
@@ -52,6 +63,7 @@ export async function reopenWorktree(
   } = options;
   const paneProjectName = path.basename(projectRoot);
   const settings = new SettingsManager(projectRoot).getSettings();
+  const metadata = readWorktreeMetadata(worktreePath);
   const sessionProjectRoot = optionsSessionProjectRoot
     || (optionsSessionConfigPath ? path.dirname(path.dirname(optionsSessionConfigPath)) : projectRoot);
 
@@ -62,11 +74,13 @@ export async function reopenWorktree(
   const configPath = optionsSessionConfigPath
     || path.join(sessionProjectRoot, '.dmux', 'dmux.config.json');
   let controlPaneId: string | undefined;
+  let configSidebarProjects: SidebarProject[] = [];
 
   try {
     const configContent = fs.readFileSync(configPath, 'utf-8');
     const config: DmuxConfig = JSON.parse(configContent);
     controlPaneId = config.controlPaneId;
+    configSidebarProjects = Array.isArray(config.sidebarProjects) ? config.sidebarProjects : [];
 
     // Verify the control pane ID from config still exists
     if (controlPaneId) {
@@ -93,7 +107,7 @@ export async function reopenWorktree(
 
   // Enable pane borders to show titles
   try {
-    tmuxService.setGlobalOptionSync('pane-border-status', 'top');
+    ensurePaneBorderStatusForCurrentSession();
   } catch {
     // Ignore if already set or fails
   }
@@ -147,7 +161,7 @@ export async function reopenWorktree(
   // Wait for CD to complete
   await new Promise((resolve) => setTimeout(resolve, 300));
 
-  // Detect which agent to use - prefer enabled agents and then fallback order.
+  // Detect which agent to use - prefer stored metadata, then fall back to enabled/installed order.
   const installedAgents = await getInstalledAgents();
   const enabledAgents = filterEnabledAgents(installedAgents, settings.enabledAgents);
   const candidateAgents = enabledAgents.length > 0 ? enabledAgents : installedAgents;
@@ -159,9 +173,14 @@ export async function reopenWorktree(
       !['claude', 'codex', 'opencode'].includes(agent)
     ),
   ];
-  const agent = preferredOrder.find((candidate) =>
-    candidateAgents.includes(candidate)
-  );
+  const configuredAgent = metadata?.agent;
+  const agent = requestedAgent
+    || (configuredAgent && candidateAgents.includes(configuredAgent)
+      ? configuredAgent
+      : preferredOrder.find((candidate) => candidateAgents.includes(candidate)));
+  const permissionMode = metadata?.permissionMode ?? settings.permissionMode;
+  const goalMode = metadata?.goalMode ?? settings.enableGoalModeByDefault ?? false;
+  const dmuxPaneId = `dmux-${Date.now()}`;
 
   // Resume the agent session (or start interactive mode when no resume command is available).
   if (agent) {
@@ -169,9 +188,52 @@ export async function reopenWorktree(
       ensureGeminiFolderTrusted(worktreePath);
     }
 
-    const resumeCommand =
-      buildResumeCommand(agent, settings.permissionMode)
-      || buildAgentCommand(agent, settings.permissionMode);
+    let resumeCommand = buildAgentResumeOrLaunchCommand(agent, permissionMode);
+    if (agent === 'codex') {
+      let codexHookEventFile: string | undefined;
+      try {
+        codexHookEventFile = installCodexPaneHooks({
+          worktreePath,
+          dmuxPaneId,
+          tmuxPaneId: paneInfo,
+        }).eventFile;
+      } catch {
+        // Hook installation is best effort; Codex can still resume normally.
+      }
+
+      resumeCommand = buildCodexHookedCommand(resumeCommand, {
+        dmuxPaneId,
+        tmuxPaneId: paneInfo,
+        eventFile: codexHookEventFile,
+      }, {
+        enableGoals: shouldEnableCodexGoals(agent, goalMode),
+      });
+    }
+
+    if (agent === 'claude') {
+      try {
+        installClaudePaneHooks({
+          worktreePath,
+          dmuxPaneId,
+          tmuxPaneId: paneInfo,
+        });
+      } catch {
+        // Hook installation is best effort; Claude can still resume normally.
+      }
+    }
+
+    if (agent === 'grok') {
+      try {
+        installGrokPaneHooks({
+          worktreePath,
+          dmuxPaneId,
+          tmuxPaneId: paneInfo,
+        });
+      } catch {
+        // Hook installation is best effort; Grok can still resume normally.
+      }
+    }
+
     await tmuxService.sendShellCommand(paneInfo, resumeCommand);
     await tmuxService.sendTmuxKeys(paneInfo, 'Enter');
   }
@@ -180,12 +242,12 @@ export async function reopenWorktree(
   await tmuxService.selectPane(paneInfo);
 
   // Create the pane object
-  const metadata = readWorktreeMetadata(worktreePath);
   const currentBranch = getCurrentBranch(worktreePath);
 
   const newPane: DmuxPane = {
-    id: `dmux-${Date.now()}`,
+    id: dmuxPaneId,
     slug,
+    displayName: metadata?.displayName,
     branchName: (metadata?.branchName || currentBranch) !== slug
       ? (metadata?.branchName || currentBranch)
       : undefined,
@@ -193,13 +255,17 @@ export async function reopenWorktree(
     paneId: paneInfo,
     projectRoot,
     projectName: paneProjectName,
+    colorTheme: resolveProjectColorTheme(projectRoot, configSidebarProjects),
     worktreePath,
     agent,
+    permissionMode,
     autopilot: settings.enableAutopilotByDefault ?? false,
+    goalMode,
     mergeTargetChain: metadata?.mergeTargetChain,
   };
 
-  // Handle welcome pane destruction if first content pane
+  // Pre-save pane to config before destroying welcome pane (first content pane only),
+  // so loadPanes sees a pane in config and doesn't recreate the welcome pane.
   if (isFirstContentPane) {
     try {
       const configContent = fs.readFileSync(configPath, 'utf-8');
@@ -208,12 +274,18 @@ export async function reopenWorktree(
       config.panes = [...existingPanes, newPane];
       config.lastUpdated = new Date().toISOString();
       atomicWriteJsonSync(configPath, config);
-
-      const { destroyWelcomePaneCoordinated } = await import('./welcomePaneManager.js');
-      destroyWelcomePaneCoordinated(sessionProjectRoot);
     } catch {
       // Log but don't fail
     }
+  }
+
+  // Always destroy welcome pane if one exists — shell panes can make isFirstContentPane
+  // false even when no real content pane exists yet.
+  try {
+    const { destroyWelcomePaneCoordinated } = await import('./welcomePaneManager.js');
+    destroyWelcomePaneCoordinated(sessionProjectRoot);
+  } catch {
+    // Ignore - welcome pane cleanup is not critical
   }
 
   // Switch back to the original pane

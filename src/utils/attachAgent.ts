@@ -18,11 +18,16 @@ import { recalculateAndApplyLayout } from './layoutManager.js';
 import { buildWorktreePaneTitle } from './paneTitle.js';
 import { SettingsManager } from './settingsManager.js';
 import { LogService } from '../services/LogService.js';
+import { installCodexPaneHooks } from './codexHooks.js';
+import { installClaudePaneHooks } from './claudeHooks.js';
+import { installGrokPaneHooks } from './grokHooks.js';
+import { resolveProjectColorTheme } from './paneColors.js';
 
 export interface AttachAgentOptions {
   targetPane: DmuxPane;
   prompt: string;
   agent: AgentName;
+  goalMode?: boolean;
   existingPanes: DmuxPane[];
   sessionProjectRoot: string;
   sessionConfigPath: string;
@@ -62,6 +67,7 @@ export async function attachAgentToWorktree(
     targetPane,
     prompt,
     agent,
+    goalMode: goalModeOverride,
     existingPanes,
     sessionProjectRoot,
     sessionConfigPath,
@@ -135,6 +141,55 @@ export async function attachAgentToWorktree(
   // Small delay for cd to complete
   await new Promise(r => setTimeout(r, 300));
 
+  const dmuxPaneId = `dmux-${Date.now()}`;
+  const goalMode = goalModeOverride ?? settings.enableGoalModeByDefault ?? false;
+  let codexHookEventFile: string | undefined;
+  if (agent === 'codex') {
+    try {
+      codexHookEventFile = installCodexPaneHooks({
+        worktreePath: targetPane.worktreePath,
+        dmuxPaneId,
+        tmuxPaneId: paneInfo,
+      }).eventFile;
+    } catch (error) {
+      LogService.getInstance().warn(
+        `Failed to install Codex hooks for ${slug}: ${error instanceof Error ? error.message : String(error)}`,
+        'attachAgent',
+        dmuxPaneId
+      );
+    }
+  }
+  if (agent === 'claude') {
+    try {
+      installClaudePaneHooks({
+        worktreePath: targetPane.worktreePath,
+        dmuxPaneId,
+        tmuxPaneId: paneInfo,
+      });
+    } catch (error) {
+      LogService.getInstance().warn(
+        `Failed to install Claude hooks for ${slug}: ${error instanceof Error ? error.message : String(error)}`,
+        'attachAgent',
+        dmuxPaneId
+      );
+    }
+  }
+  if (agent === 'grok') {
+    try {
+      installGrokPaneHooks({
+        worktreePath: targetPane.worktreePath,
+        dmuxPaneId,
+        tmuxPaneId: paneInfo,
+      });
+    } catch (error) {
+      LogService.getInstance().warn(
+        `Failed to install Grok hooks for ${slug}: ${error instanceof Error ? error.message : String(error)}`,
+        'attachAgent',
+        dmuxPaneId
+      );
+    }
+  }
+
   // Launch the agent
   await launchAgentInPane({
     paneId: paneInfo,
@@ -142,6 +197,9 @@ export async function attachAgentToWorktree(
     prompt,
     slug,
     projectRoot,
+    goalMode,
+    dmuxPaneId,
+    codexHookEventFile,
     permissionMode: settings.permissionMode,
   });
 
@@ -157,16 +215,19 @@ export async function attachAgentToWorktree(
 
   // Build the sibling pane object — shares worktree/branch with target
   const newPane: DmuxPane = {
-    id: `dmux-${Date.now()}`,
+    id: dmuxPaneId,
     slug,
     branchName: targetPane.branchName,
     prompt: prompt || 'No initial prompt',
     paneId: paneInfo,
     projectRoot,
     projectName: targetPane.projectName,
+    colorTheme: targetPane.colorTheme || resolveProjectColorTheme(projectRoot, []),
     worktreePath: targetPane.worktreePath,
     agent,
+    permissionMode: settings.permissionMode,
     autopilot: settings.enableAutopilotByDefault ?? false,
+    goalMode,
   };
 
   // Switch focus back to control pane

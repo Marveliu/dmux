@@ -6,6 +6,7 @@ export function render() {
     <p class="lead">dmux is designed for keyboard-first navigation. All major actions are available through single-key shortcuts.</p>
 
     <h2>Pane Management</h2>
+    <p><kbd>Alt+Shift+M</kbd> opens the pane menu for the currently focused tmux pane. dmux renders the same pane menu used in the sidebar, but positions it over the active pane so you can act on that pane without moving focus back to the control sidebar first.</p>
     <table class="shortcut-table">
       <thead>
         <tr><th>Key</th><th>Action</th></tr>
@@ -14,6 +15,7 @@ export function render() {
         <tr><td><kbd>n</kbd></td><td>Create a new pane in the main project</td></tr>
         <tr><td><kbd>t</kbd></td><td>Create a terminal pane (no agent, just a shell in a worktree)</td></tr>
         <tr><td><kbd>p</kbd></td><td>Create a pane in another attached project</td></tr>
+        <tr><td><kbd>Alt+Shift+M</kbd></td><td>Open the pane menu for the focused tmux pane</td></tr>
         <tr><td><kbd>j</kbd></td><td>Jump to the selected pane (switch tmux focus)</td></tr>
         <tr><td><kbd>m</kbd></td><td>Open the kebab menu for the selected pane</td></tr>
         <tr><td><kbd>x</kbd></td><td>Close the selected pane</td></tr>
@@ -100,8 +102,9 @@ export function render() {
       <li><strong>Hide All Other Panes / Show All Other Panes</strong> — isolate the current pane or bring the others back</li>
       <li><strong>Show Only This Project / Show All Panes</strong> — focus one project's panes in a shared session</li>
       <li><strong>Merge</strong> — merge the pane's work back to main</li>
+      <li><strong>Create GitHub PR</strong> — push the pane branch and file a pull request against its current merge target</li>
       <li><strong>Close</strong> — close the pane and optionally remove the worktree</li>
-      <li><strong>Rename</strong> — rename the pane slug</li>
+      <li><strong>Rename</strong> — rename the pane label without changing the worktree slug</li>
       <li><strong>Add Agent to Worktree</strong> — launch another agent in the same worktree</li>
       <li><strong>Add Terminal to Worktree</strong> — open a shell pane in the worktree</li>
       <li><strong>Browse Files</strong> — open the read-only worktree file browser</li>

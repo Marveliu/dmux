@@ -18,6 +18,7 @@ Core behavior:
 
 - One project-scoped dmux session (stable name based on project root hash)
 - One worktree per work pane
+- Durable regular terminals restored in their last observed working directories
 - Agent launch + prompt bootstrap in each pane
 - Merge/close actions with worktree cleanup hooks
 - Optional multi-project grouping in one session
@@ -28,11 +29,17 @@ Core behavior:
 - `src/DmuxApp.tsx`: main TUI state, status/footer, input hookups, source switching
 - `src/services/DmuxFocusService.ts`: macOS helper lifecycle, fully-focused pane tracking, helper-backed native notifications
 - `src/services/DmuxAttentionService.ts`: attention-notification coordinator for idle/waiting panes
+- `src/services/InferenceService.ts`: provider-neutral text inference, dynamic model discovery, and primary/backup failover
+- `src/services/CodexAppServerClient.ts`: ChatGPT subscription auth/model/inference bridge through Codex app-server
+- `src/services/TerminalPaneNamingService.ts`: LLM-based naming for regular terminals — untitled panes are checked aggressively and named from streaming output; titled panes only rename from settled output on a relaxed cadence; human names are protected
+- `src/utils/paneAgentTracking.ts`: process-tree detection for agents launched manually in any pane, plus exact Claude/Codex session capture used by crash restoration
+- `src/hooks/usePaneLoading.ts`: persisted pane loading/rebinding and recreation for both worktree and terminal panes
 - `src/hooks/useInputHandling.ts`: keyboard and menu action handling
 - `src/services/PopupManager.ts`: popup launch + data plumbing
 - `src/actions/types.ts`: action registry and menu visibility rules
 - `src/actions/implementations/closeAction.ts`: close behavior + source fallback on source-pane removal
 - `src/components/panes/*`: pane list rendering (includes source indicator)
+- `src/utils/sidebarMouse.ts` + `src/hooks/useSidebarMouse.ts`: sidebar mouse support; mouse escape sequences are stripped from Ink's stdin via a proxy stream and re-emitted as events. Click highlights a row without changing tmux pane focus, double-click activates it (pane menu / action button), wheel steps the selection. `kebabMenuPopup` uses the same scheme so menu items are clickable
 
 ## Native helper
 

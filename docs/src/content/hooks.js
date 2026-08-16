@@ -43,7 +43,7 @@ chmod +x .dmux-hooks/*</code></pre>
       <tbody>
         <tr><td><code>DMUX_PANE_SLUG</code></td><td>The slug (branch name) for the new pane</td></tr>
         <tr><td><code>DMUX_PANE_PROMPT</code></td><td>The user's prompt text</td></tr>
-        <tr><td><code>DMUX_PANE_AGENT</code></td><td>The selected agent (claude, opencode, codex)</td></tr>
+        <tr><td><code>DMUX_PANE_AGENT</code></td><td>The selected agent ID, for example <code>claude</code>, <code>opencode</code>, <code>codex</code>, or <code>grok</code></td></tr>
         <tr><td><code>DMUX_PROJECT_NAME</code></td><td>The project name</td></tr>
         <tr><td><code>DMUX_PROJECT_PATH</code></td><td>Path to the project root</td></tr>
       </tbody>
@@ -80,7 +80,7 @@ chmod +x .dmux-hooks/*</code></pre>
 
     <div class="callout callout-tip">
       <div class="callout-title">Common use case</div>
-      Use <code>worktree_created</code> to run <code>npm install</code> or <code>pnpm install</code> in the new worktree, so the agent has all dependencies ready.
+      Use <code>worktree_created</code> to run <code>npm install</code> or <code>pnpm install</code> in the new worktree, so the agent has all dependencies ready. During this hook, stdout and stderr stream into the new pane's setup UI, and dmux waits without a fixed timeout. dmux sets <code>DMUX_PROGRESS=1</code> and <code>DMUX_STATUS_PREFIX=DMUX_STATUS:</code>; prefix a line with that value to show a clean status message.
     </div>
 
     <h4><code>before_pane_close</code></h4>
@@ -199,12 +199,23 @@ chmod +x .dmux-hooks/*</code></pre>
 
 cd "$DMUX_WORKTREE_PATH"
 
+status() {
+  if [ "\${DMUX_PROGRESS:-0}" = "1" ]; then
+    echo "\${DMUX_STATUS_PREFIX:-DMUX_STATUS:} $*"
+  else
+    echo "[Hook] $*"
+  fi
+}
+
 # Install Node.js dependencies
 if [ -f "pnpm-lock.yaml" ]; then
+  status "Installing dependencies with pnpm"
   pnpm install --frozen-lockfile
 elif [ -f "package-lock.json" ]; then
+  status "Installing dependencies with npm"
   npm ci
 elif [ -f "yarn.lock" ]; then
+  status "Installing dependencies with yarn"
   yarn install --frozen-lockfile
 fi</code></pre>
 
@@ -230,7 +241,7 @@ osascript -e "display notification \\"Merged $DMUX_PANE_SLUG into $DMUX_MAIN_BRA
 
     <div class="callout callout-warning">
       <div class="callout-title">Important</div>
-      Hook scripts must be executable. Run <code>chmod +x .dmux-hooks/*</code> after creating them. Hooks that exit with a non-zero status code will abort the operation for <code>pre_merge</code> and <code>before_pane_create</code>.
+      Hook scripts must be executable. Run <code>chmod +x .dmux-hooks/*</code> after creating them. Hooks that exit with a non-zero status code will abort the operation for <code>pre_merge</code>, <code>before_pane_create</code>, and <code>worktree_created</code>.
     </div>
   `;
 }

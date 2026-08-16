@@ -1,13 +1,21 @@
 import { TmuxService } from '../services/TmuxService.js';
 import {
   buildPromptReadAndDeleteSnippet,
+  shellQuote,
   writePromptFile,
 } from './promptStore.js';
+import {
+  buildCodexPaneEnvironmentPrefix,
+  CODEX_ENABLE_HOOKS_FLAG,
+  CODEX_ENABLE_GOALS_FLAG,
+} from './codexHooks.js';
+import { sendPromptViaTmux } from './agentPromptDispatch.js';
 
 export const AGENT_IDS = [
   'claude',
   'opencode',
   'codex',
+  'grok',
   'cline',
   'gemini',
   'qwen',
@@ -29,6 +37,13 @@ export interface AgentLaunchOption {
   isPair: boolean;
 }
 
+export interface AgentLaunchInstance {
+  agent: AgentName;
+  ordinal: number;
+  totalForAgent: number;
+  slugSuffix?: string;
+}
+
 export interface AgentRegistryEntry {
   id: AgentName;
   name: string;
@@ -48,6 +63,7 @@ export interface AgentRegistryEntry {
   permissionFlags: Partial<Record<Exclude<PermissionMode, ''>, string>>;
   defaultEnabled: boolean;
   resumeCommandTemplate?: string;
+  resumeSessionCommandTemplate?: string;
 }
 
 const HOME = process.env.HOME || '';
@@ -79,6 +95,7 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     },
     defaultEnabled: true,
     resumeCommandTemplate: 'claude --continue{permissions}',
+    resumeSessionCommandTemplate: 'claude --resume {sessionId}{permissions}',
   },
   opencode: {
     id: 'opencode',
@@ -121,6 +138,35 @@ export const AGENT_REGISTRY: Readonly<Record<AgentName, AgentRegistryEntry>> = {
     },
     defaultEnabled: true,
     resumeCommandTemplate: 'codex resume --last{permissions}',
+    resumeSessionCommandTemplate: 'codex resume {sessionId}{permissions}',
+  },
+  grok: {
+    id: 'grok',
+    name: 'Grok Build',
+    shortLabel: 'gb',
+    description: 'xAI Grok Build CLI',
+    slugSuffix: 'grok-build',
+    installTestCommand: 'command -v grok 2>/dev/null || which grok 2>/dev/null',
+    commonPaths: [
+      ...homePath('.grok/bin/grok'),
+      '/usr/local/bin/grok',
+      '/opt/homebrew/bin/grok',
+      ...homePath('.local/bin/grok'),
+      ...homePath('bin/grok'),
+      ...homePath('.npm-global/bin/grok'),
+    ],
+    promptCommand: 'grok',
+    promptTransport: 'send-keys',
+    sendKeysSubmit: ['Enter'],
+    sendKeysPostPasteDelayMs: 150,
+    sendKeysReadyDelayMs: 1600,
+    permissionFlags: {
+      plan: '--permission-mode plan',
+      acceptEdits: '--permission-mode acceptEdits',
+      bypassPermissions: '--always-approve',
+    },
+    defaultEnabled: true,
+    resumeCommandTemplate: 'grok --continue{permissions}',
   },
   cline: {
     id: 'cline',
@@ -404,6 +450,30 @@ export function getDefaultEnabledAgents(): AgentName[] {
   return AGENT_IDS.filter((agent) => AGENT_REGISTRY[agent].defaultEnabled);
 }
 
+export function supportsAgentGoalMode(agent: AgentName | undefined): boolean {
+  return agent === 'claude' || agent === 'codex';
+}
+
+export function buildGoalModePrompt(
+  agent: AgentName | undefined,
+  prompt: string,
+  goalMode: boolean | undefined
+): string {
+  const trimmedPrompt = prompt.trim();
+  if (!goalMode || !supportsAgentGoalMode(agent) || !trimmedPrompt) {
+    return prompt;
+  }
+
+  return `/goal ${trimmedPrompt}`;
+}
+
+export function shouldEnableCodexGoals(
+  agent: AgentName | undefined,
+  goalMode: boolean | undefined
+): boolean {
+  return agent === 'codex' && goalMode === true;
+}
+
 /**
  * Resolve enabled agent list from settings.
  * If the user has not configured enabledAgents, fall back to registry defaults.
@@ -456,6 +526,38 @@ export function buildAgentLaunchOptions(
   }));
 }
 
+export function buildAgentLaunchInstances(
+  selectedAgents: readonly AgentName[]
+): AgentLaunchInstance[] {
+  const totalByAgent = new Map<AgentName, number>();
+  for (const agent of selectedAgents) {
+    totalByAgent.set(agent, (totalByAgent.get(agent) || 0) + 1);
+  }
+
+  const seenByAgent = new Map<AgentName, number>();
+  const isMultiLaunch = selectedAgents.length > 1;
+
+  return selectedAgents.map((agent) => {
+    const ordinal = (seenByAgent.get(agent) || 0) + 1;
+    seenByAgent.set(agent, ordinal);
+
+    const totalForAgent = totalByAgent.get(agent) || 1;
+    const baseSlugSuffix = getAgentSlugSuffix(agent);
+    const slugSuffix = isMultiLaunch
+      ? totalForAgent > 1
+        ? `${baseSlugSuffix}-${ordinal}`
+        : baseSlugSuffix
+      : undefined;
+
+    return {
+      agent,
+      ordinal,
+      totalForAgent,
+      slugSuffix,
+    };
+  });
+}
+
 /**
  * Resolve CLI permission flags for a given agent and dmux permissionMode.
  */
@@ -505,9 +607,13 @@ export function buildInitialPromptCommand(
 
 export function buildResumeCommand(
   agent: AgentName,
-  permissionMode: PermissionMode | undefined
+  permissionMode: PermissionMode | undefined,
+  sessionId?: string
 ): string | undefined {
-  const template = AGENT_REGISTRY[agent].resumeCommandTemplate;
+  const definition = AGENT_REGISTRY[agent];
+  const template = sessionId && definition.resumeSessionCommandTemplate
+    ? definition.resumeSessionCommandTemplate.replace('{sessionId}', shellQuote(sessionId))
+    : definition.resumeCommandTemplate;
   if (!template) return undefined;
 
   const permissionFlags = getPermissionFlags(agent, permissionMode);
@@ -518,6 +624,15 @@ export function buildResumeCommand(
   }
 
   return appendFlags(template, permissionFlags);
+}
+
+export function buildAgentResumeOrLaunchCommand(
+  agent: AgentName,
+  permissionMode: PermissionMode | undefined,
+  sessionId?: string
+): string {
+  return buildResumeCommand(agent, permissionMode, sessionId)
+    || buildAgentCommand(agent, permissionMode);
 }
 
 /**
@@ -532,11 +647,15 @@ export async function launchAgentInPane(opts: {
   prompt: string;
   slug: string;
   projectRoot: string;
+  goalMode?: boolean;
+  dmuxPaneId?: string;
+  codexHookEventFile?: string;
   permissionMode?: '' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 }): Promise<void> {
   const { paneId, agent, prompt, slug, projectRoot, permissionMode } = opts;
   const tmuxService = TmuxService.getInstance();
-  const hasInitialPrompt = !!(prompt && prompt.trim());
+  const launchPrompt = buildGoalModePrompt(agent, prompt, opts.goalMode);
+  const hasInitialPrompt = !!(launchPrompt && launchPrompt.trim());
 
   if (agent === 'claude') {
     const permissionFlags = getPermissionFlags('claude', permissionMode);
@@ -545,7 +664,7 @@ export async function launchAgentInPane(opts: {
     if (hasInitialPrompt) {
       let promptFilePath: string | null = null;
       try {
-        promptFilePath = await writePromptFile(projectRoot, slug, prompt);
+        promptFilePath = await writePromptFile(projectRoot, slug, launchPrompt);
       } catch {
         // Fall back to inline escaping if prompt file write fails
       }
@@ -554,7 +673,7 @@ export async function launchAgentInPane(opts: {
         const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
         claudeCmd = `${promptBootstrap}; claude "$DMUX_PROMPT_CONTENT"${permissionSuffix}`;
       } else {
-        const escapedPrompt = prompt
+        const escapedPrompt = launchPrompt
           .replace(/\\/g, '\\\\')
           .replace(/"/g, '\\"')
           .replace(/`/g, '\\`')
@@ -569,28 +688,32 @@ export async function launchAgentInPane(opts: {
   } else if (agent === 'codex') {
     const permissionFlags = getPermissionFlags('codex', permissionMode);
     const permissionSuffix = permissionFlags ? ` ${permissionFlags}` : '';
+    const codexEnvPrefix = buildCodexPaneEnvironmentPrefix({
+      dmuxPaneId: opts.dmuxPaneId || '',
+      tmuxPaneId: paneId,
+      eventFile: opts.codexHookEventFile,
+    });
+    const codexFeatureFlags = [
+      CODEX_ENABLE_HOOKS_FLAG,
+      ...(shouldEnableCodexGoals(agent, opts.goalMode) ? [CODEX_ENABLE_GOALS_FLAG] : []),
+    ].join(' ');
     let codexCmd: string;
     if (hasInitialPrompt) {
       let promptFilePath: string | null = null;
       try {
-        promptFilePath = await writePromptFile(projectRoot, slug, prompt);
+        promptFilePath = await writePromptFile(projectRoot, slug, launchPrompt);
       } catch {
         // Fall back to inline escaping if prompt file write fails
       }
 
       if (promptFilePath) {
         const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
-        codexCmd = `${promptBootstrap}; codex "$DMUX_PROMPT_CONTENT"${permissionSuffix}`;
+        codexCmd = `${promptBootstrap}; ${codexEnvPrefix} codex ${codexFeatureFlags} "$DMUX_PROMPT_CONTENT"${permissionSuffix}`;
       } else {
-        const escapedPrompt = prompt
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .replace(/`/g, '\\`')
-          .replace(/\$/g, '\\$');
-        codexCmd = `codex "${escapedPrompt}"${permissionSuffix}`;
+        codexCmd = `${codexEnvPrefix} codex ${codexFeatureFlags} ${shellQuote(launchPrompt)}${permissionSuffix}`;
       }
     } else {
-      codexCmd = `codex${permissionSuffix}`;
+      codexCmd = `${codexEnvPrefix} codex ${codexFeatureFlags}${permissionSuffix}`;
     }
     await tmuxService.sendShellCommand(paneId, codexCmd);
     await tmuxService.sendTmuxKeys(paneId, 'Enter');
@@ -599,7 +722,7 @@ export async function launchAgentInPane(opts: {
     if (hasInitialPrompt) {
       let promptFilePath: string | null = null;
       try {
-        promptFilePath = await writePromptFile(projectRoot, slug, prompt);
+        promptFilePath = await writePromptFile(projectRoot, slug, launchPrompt);
       } catch {
         // Fall back to inline escaping if prompt file write fails
       }
@@ -608,7 +731,7 @@ export async function launchAgentInPane(opts: {
         const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
         opencodeCmd = `${promptBootstrap}; opencode --prompt "$DMUX_PROMPT_CONTENT"`;
       } else {
-        const escapedPrompt = prompt
+        const escapedPrompt = launchPrompt
           .replace(/\\/g, '\\\\')
           .replace(/"/g, '\\"')
           .replace(/`/g, '\\`')
@@ -620,5 +743,50 @@ export async function launchAgentInPane(opts: {
     }
     await tmuxService.sendShellCommand(paneId, opencodeCmd);
     await tmuxService.sendTmuxKeys(paneId, 'Enter');
+  } else {
+    let launchCommand: string;
+    const promptTransport = getPromptTransport(agent);
+
+    if (hasInitialPrompt && promptTransport !== 'send-keys') {
+      let promptFilePath: string | null = null;
+      try {
+        promptFilePath = await writePromptFile(projectRoot, slug, launchPrompt);
+      } catch {
+        // Fall back to inline escaping if prompt file write fails
+      }
+
+      if (promptFilePath) {
+        const promptBootstrap = buildPromptReadAndDeleteSnippet(promptFilePath);
+        launchCommand = `${promptBootstrap}; ${buildInitialPromptCommand(
+          agent,
+          '"$DMUX_PROMPT_CONTENT"',
+          permissionMode
+        )}`;
+      } else {
+        launchCommand = buildInitialPromptCommand(
+          agent,
+          shellQuote(launchPrompt),
+          permissionMode
+        );
+      }
+    } else {
+      launchCommand = buildAgentCommand(agent, permissionMode);
+    }
+
+    await tmuxService.sendShellCommand(paneId, launchCommand);
+    await tmuxService.sendTmuxKeys(paneId, 'Enter');
+
+    if (hasInitialPrompt && promptTransport === 'send-keys') {
+      await sendPromptViaTmux({
+        paneId,
+        prompt: launchPrompt,
+        tmuxService,
+        expectedCommand: getAgentProcessName(agent),
+        prePromptKeys: getSendKeysPrePrompt(agent),
+        submitKeys: getSendKeysSubmit(agent),
+        postPasteDelayMs: getSendKeysPostPasteDelayMs(agent),
+        readyDelayMs: getSendKeysReadyDelayMs(agent),
+      });
+    }
   }
 }

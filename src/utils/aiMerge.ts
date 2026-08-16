@@ -8,73 +8,29 @@ import { execSync } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
 import { LogService } from '../services/LogService.js';
+import { generateInferenceText } from '../services/InferenceService.js';
 
 /**
- * Fetch with timeout wrapper
+ * Call the configured inference provider with optional backup failover.
  */
-async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
+export async function callInference(
+  prompt: string,
+  maxTokens: number = 1000,
+  timeoutMs: number = 12000
+): Promise<string | null> {
   try {
-    const response = await fetch(url, {
-      ...options,
-      signal: controller.signal,
+    return await generateInferenceText(prompt, {
+      maxTokens,
+      timeoutMs,
+      temperature: 0.3,
     });
-    clearTimeout(timeoutId);
-    return response;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    throw error;
+  } catch {
+    return null;
   }
 }
 
-/**
- * Call OpenRouter API for AI assistance with model fallback
- */
-async function callOpenRouter(prompt: string, maxTokens: number = 1000, timeoutMs: number = 12000): Promise<string | null> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) return null;
-
-  const models = ['google/gemini-2.5-flash', 'x-ai/grok-4-fast:free', 'openai/gpt-4o-mini'];
-
-  for (const model of models) {
-    try {
-      const response = await fetchWithTimeout(
-        'https://openrouter.ai/api/v1/chat/completions',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              {
-                role: 'user',
-                content: prompt,
-              },
-            ],
-            max_tokens: maxTokens,
-            temperature: 0.3,
-          }),
-        },
-        timeoutMs
-      );
-
-      if (response.ok) {
-        const data = (await response.json()) as any;
-        return data.choices[0].message.content.trim();
-      }
-    } catch {
-      // Try next model
-      continue;
-    }
-  }
-
-  return null;
-}
+/** @deprecated Use callInference. */
+export const callOpenRouter = callInference;
 
 /**
  * Call Claude Code CLI for AI assistance
@@ -156,8 +112,8 @@ export async function generateCommitMessage(repoPath: string): Promise<string | 
 
     const prompt = `Generate a concise conventional commit message (e.g., "feat: add feature", "fix: bug") for these changes. Respond with ONLY the commit message, nothing else:\n\nFile changes:\n${summary}\n\nDiff:\n${contextDiff}`;
 
-    // Try OpenRouter first
-    let message = await callOpenRouter(prompt, 50);
+    // Try the configured inference stack first
+    let message = await callInference(prompt, 50);
     if (message) {
       // Clean up the response
       message = message.replace(/^["']|["']$/g, '').trim();
@@ -269,6 +225,9 @@ export async function aiResolveConflict(
     }
 
     // For now, use a simple strategy: try to intelligently merge both versions
+    const conflictStart = '<<<<<<<';
+    const conflictSeparator = '=======';
+    const conflictEnd = '>>>>>>>';
     const prompt = `You are resolving a git merge conflict. Below is a file with conflict markers.
 
 Your task: Provide the COMPLETE resolved file content that intelligently combines both versions. Do NOT include any explanations, just the final file content.
@@ -280,11 +239,11 @@ ${conflicts
   .map(
     (c, i) => `
 Conflict ${i + 1}:
-<<<<<<< OURS (current branch)
+${conflictStart} OURS (current branch)
 ${c.ours}
-=======
->>>>>>> THEIRS (incoming branch)
+${conflictSeparator}
 ${c.theirs}
+${conflictEnd} THEIRS (incoming branch)
 `
   )
   .join('\n')}
@@ -294,8 +253,8 @@ ${content}
 
 Respond with ONLY the complete resolved file content, no explanations:`;
 
-    // Try OpenRouter with longer timeout for conflict resolution
-    let resolved = await callOpenRouter(prompt, 2000, 20000);
+    // Use a longer timeout for conflict resolution
+    let resolved = await callInference(prompt, 2000, 20000);
     if (!resolved) {
       // Try Claude Code with longer timeout for conflict resolution
       resolved = await callClaudeCode(prompt, 20000);

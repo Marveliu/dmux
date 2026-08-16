@@ -1,0 +1,13 @@
+{
+  "source": "codex-stop-hook",
+  "dmuxPaneId": "dmux-1776708264504",
+  "tmuxPaneId": "%2",
+  "expectedDmuxPaneId": "dmux-1776708264504",
+  "expectedTmuxPaneId": "%2",
+  "hookEventName": "Stop",
+  "turnId": "019db078-148e-7663-b3ab-f39583421de4",
+  "lastAssistantMessage": "Yes. The global `dmux` is linked to this worktree:\n\n```bash\n/Users/justinschroeder/Library/pnpm/global/5/node_modules/dmux\n  -> /Users/justinschroeder/Projects/dmux/.dmux/worktrees/dmux-slowness-codex\n```\n\nAnd I rebuilt after the timeout fix, so the linked global command is using the updated `dist/` output. You can test from any project with:\n\n```bash\ndmux\n```\n\nOne note: if you make more source edits here, run this again before testing globally:\n\n```bash\npnpm run build\n```",
+  "transcriptPath": "/Users/justinschroeder/.codex/sessions/2026/04/20/rollout-2026-04-20T14-04-28-019dac10-b057-7691-b6ee-10046bdb1054.jsonl",
+  "cwd": "/Users/justinschroeder/Projects/dmux/.dmux/worktrees/dmux-slowness-codex",
+  "timestamp": 1776782163900
+}

@@ -70,7 +70,12 @@ export default function useAgentStatus({ panes, suspend, onPaneRemoved }: UseAge
 
   useEffect(() => {
     const detector = statusDetector.current;
-    const paneSignature = panes.map((pane) => pane.id).join(',');
+    const paneSignature = panes.map((pane) => {
+      const monitoredAgent = pane.activeAgent
+        || (pane.type !== 'shell' ? pane.agent : undefined)
+        || '';
+      return `${pane.id}:${pane.paneId}:${monitoredAgent}`;
+    }).join(',');
 
     if (suspend || panes.length === 0) {
       lastMonitorSignature.current = '';
@@ -83,12 +88,14 @@ export default function useAgentStatus({ panes, suspend, onPaneRemoved }: UseAge
     lastMonitorSignature.current = paneSignature;
 
     // Update monitoring when panes change or suspend state changes
-    detector.monitorPanes(panes).catch(err => {
-      LogService.getInstance().debug(
-        `Failed to monitor panes: ${err instanceof Error ? err.message : String(err)}`,
-        'useAgentStatus'
-      );
-    });
+    detector.monitorPanes(panes)
+      .then(() => setStatuses(detector.getAllStatuses()))
+      .catch(err => {
+        LogService.getInstance().debug(
+          `Failed to monitor panes: ${err instanceof Error ? err.message : String(err)}`,
+          'useAgentStatus'
+        );
+      });
   }, [panes, suspend]);
 
   return statuses;

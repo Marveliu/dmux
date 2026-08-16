@@ -26,6 +26,13 @@ export interface PaneChangeEvent {
   source: PaneEventMode;
 }
 
+export interface PaneFocusEvent {
+  type: 'pane-focus-changed';
+  activePaneId?: string | null;
+  timestamp: number;
+  source: PaneEventMode;
+}
+
 interface PaneEventConfig {
   sessionName: string;
   controlPaneId?: string;
@@ -106,12 +113,18 @@ export class PaneEventService extends EventEmitter {
   private startHookMode(): void {
     // Subscribe to hook events with debouncing
     this.unsubscribeHook = this.hookManager.onHookTriggered(() => {
+      const timestamp = Date.now();
       this.emit('panes-changed', {
         type: 'panes-changed',
-        timestamp: Date.now(),
+        timestamp,
         source: 'hooks',
       } as PaneChangeEvent);
-    }, 100); // 100ms debounce
+      this.emit('pane-focus-changed', {
+        type: 'pane-focus-changed',
+        timestamp,
+        source: 'hooks',
+      } as PaneFocusEvent);
+    }, 25); // Keep hook updates responsive while still coalescing rapid tmux signals.
   }
 
   /**
@@ -143,6 +156,15 @@ export class PaneEventService extends EventEmitter {
               timestamp: message.timestamp,
               source: 'polling',
             } as PaneChangeEvent);
+            break;
+
+          case 'pane-focus-changed':
+            this.emit('pane-focus-changed', {
+              type: 'pane-focus-changed',
+              activePaneId: message.activePaneId,
+              timestamp: message.timestamp,
+              source: 'polling',
+            } as PaneFocusEvent);
             break;
 
           case 'error':
@@ -217,11 +239,17 @@ export class PaneEventService extends EventEmitter {
       this.pollingWorker.postMessage({ type: 'force-poll' });
     } else if (this.mode === 'hooks') {
       // Emit event immediately
+      const timestamp = Date.now();
       this.emit('panes-changed', {
         type: 'panes-changed',
-        timestamp: Date.now(),
+        timestamp,
         source: 'hooks',
       } as PaneChangeEvent);
+      this.emit('pane-focus-changed', {
+        type: 'pane-focus-changed',
+        timestamp,
+        source: 'hooks',
+      } as PaneFocusEvent);
     }
   }
 
@@ -275,6 +303,15 @@ export class PaneEventService extends EventEmitter {
   onPanesChanged(callback: (event: PaneChangeEvent) => void): () => void {
     this.on('panes-changed', callback);
     return () => this.off('panes-changed', callback);
+  }
+
+  /**
+   * Subscribe to pane focus events
+   * Returns an unsubscribe function
+   */
+  onPaneFocusChanged(callback: (event: PaneFocusEvent) => void): () => void {
+    this.on('pane-focus-changed', callback);
+    return () => this.off('pane-focus-changed', callback);
   }
 
   /**

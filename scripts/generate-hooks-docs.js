@@ -54,8 +54,10 @@ Create executable bash scripts in \`.dmux-hooks/\` that run automatically at key
 
 ## Hook Execution Model
 
-- **Non-blocking**: Hooks run in background (detached processes)
-- **Silent failures**: Hook errors are logged but don't stop dmux
+- **Mostly non-blocking**: Most hooks run in background (detached processes)
+- **Bootstrap-gated**: \`worktree_created\` blocks agent launch so setup can finish first, with no fixed timeout
+- **Live bootstrap output**: During \`worktree_created\`, stdout/stderr is streamed into the new pane's setup UI
+- **Failure behavior**: Background hook errors are logged; gated hooks can abort the operation
 - **Environment-based**: All context passed via environment variables
 - **Version controlled**: Hooks in \`.dmux-hooks/\` are shared with team
 - **Priority resolution**: \`.dmux-hooks/\` → \`.dmux/hooks/\` → \`~/.dmux/hooks/\`
@@ -85,6 +87,24 @@ DMUX_TMUX_PANE_ID="%38"                # tmux pane ID
 \`\`\`bash
 DMUX_WORKTREE_PATH="/path/.dmux/worktrees/fix-auth-bug"
 DMUX_BRANCH="fix-auth-bug"             # Same as slug
+\`\`\`
+
+### Bootstrap Progress Context
+\`\`\`bash
+DMUX_PROGRESS="1"                      # Set when output is shown in the new pane setup UI
+DMUX_STATUS_PREFIX="DMUX_STATUS:"      # Prefix for clean status messages
+\`\`\`
+
+\`worktree_created\` can emit progress while it runs. Any stdout/stderr line is shown in the setup UI; lines prefixed with \`$DMUX_STATUS_PREFIX\` are displayed without the prefix.
+
+\`\`\`bash
+status() {
+  if [ "\${DMUX_PROGRESS:-0}" = "1" ]; then
+    echo "\${DMUX_STATUS_PREFIX:-DMUX_STATUS:} $*"
+  else
+    echo "[Hook] $*"
+  fi
+}
 \`\`\`
 
 ### Merge Context
@@ -124,18 +144,32 @@ curl -X PUT "http://localhost:$DMUX_SERVER_PORT/api/panes/$DMUX_PANE_ID/dev" \\
 
 cd "$DMUX_WORKTREE_PATH"
 
+status() {
+  if [ "\${DMUX_PROGRESS:-0}" = "1" ]; then
+    echo "\${DMUX_STATUS_PREFIX:-DMUX_STATUS:} $*"
+  else
+    echo "[Hook] $*"
+  fi
+}
+
 if [ -f "pnpm-lock.yaml" ]; then
-  pnpm install --prefer-offline &
+  status "Installing dependencies with pnpm"
+  pnpm install --prefer-offline
 elif [ -f "package-lock.json" ]; then
-  npm install &
+  status "Installing dependencies with npm"
+  npm install
 elif [ -f "yarn.lock" ]; then
-  yarn install &
+  status "Installing dependencies with yarn"
+  yarn install
 elif [ -f "Gemfile" ]; then
-  bundle install &
+  status "Installing gems"
+  bundle install
 elif [ -f "requirements.txt" ]; then
-  pip install -r requirements.txt &
+  status "Installing Python dependencies"
+  pip install -r requirements.txt
 elif [ -f "Cargo.toml" ]; then
-  cargo build &
+  status "Building Rust project"
+  cargo build
 fi
 \`\`\`
 
@@ -214,7 +248,7 @@ PORT=$(grep -oP 'localhost:\\K\\d+' "$LOG_FILE" | head -1)
 if command -v cloudflared &> /dev/null; then
   TUNNEL=$(cloudflared tunnel --url "http://localhost:$PORT" 2>&1 | \\
     grep -oP 'https://[a-z0-9-]+\\.trycloudflare\\.com' | head -1)
-  URL="\\\${TUNNEL:-http://localhost:$PORT}"
+  URL="\${TUNNEL:-http://localhost:$PORT}"
 else
   URL="http://localhost:$PORT"
 fi
@@ -407,7 +441,8 @@ When creating a new hook:
 - [ ] Make executable: \`chmod +x\`
 - [ ] Add \`set -e\` for error handling
 - [ ] Use environment variables (never hardcode paths)
-- [ ] Background long operations with \`&\`
+- [ ] Keep blocking hooks chatty with status output
+- [ ] Background long operations with \`&\` only when the hook does not gate the operation
 - [ ] Check for required tools before using
 - [ ] Test manually with mock env vars
 - [ ] Add comments explaining what it does
@@ -433,7 +468,7 @@ const tsContent = `/**
  * DO NOT EDIT MANUALLY - run 'pnpm generate:hooks-docs' to regenerate
  */
 
-export const AGENTS_MD = \`${agentsMd.replace(/`/g, '\\`')}\`;
+export const AGENTS_MD = \`${agentsMd.replace(/`/g, '\\`').replace(/\$\{/g, '\\${')}\`;
 `;
 
 writeFileSync(outputPath, tsContent);
@@ -446,7 +481,7 @@ function generateHooksTable() {
   const hookDescriptions = {
     before_pane_create: ['Before pane creation', 'Validation, notifications, pre-flight checks'],
     pane_created: ['After pane, before worktree', 'Configure tmux settings, prepare environment'],
-    worktree_created: ['After full setup', 'Install deps, copy configs, setup git'],
+    worktree_created: ['After worktree creation, before agent launch', 'Install deps, copy configs, setup git'],
     before_pane_close: ['Before closing', 'Save state, backup uncommitted work'],
     pane_closed: ['After closed', 'Cleanup resources, analytics, notifications'],
     before_worktree_remove: ['Before worktree removal', 'Archive worktree, save artifacts'],

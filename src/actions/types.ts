@@ -24,6 +24,7 @@ export type ActionResultType =
   | 'confirm'           // Need user confirmation (yes/no)
   | 'choice'            // Need user to select from options
   | 'input'             // Need user text input
+  | 'pr_review'         // Specialized PR review popup (editable summary + file list + diff peek)
   | 'info'              // Informational message, no action needed
   | 'progress'          // Long-running action, show progress
   | 'navigation';       // Navigate to a different view/pane
@@ -61,6 +62,16 @@ export interface ActionResult {
   placeholder?: string;
   defaultValue?: string;
   onSubmit?: (value: string) => Promise<ActionResult>;
+  inputMaxVisibleLines?: number;  // If set, input scrolls within this many lines and popup is enlarged
+
+  // For 'pr_review' type (reuses defaultValue for initial summary text and onSubmit for the result)
+  reviewData?: {
+    repoPath: string;
+    sourceBranch: string;
+    targetBranch: string;
+    files: string[];
+    aiFailed?: boolean;
+  };
 
   // For 'progress' type
   progress?: number;      // 0-100, or undefined for indeterminate
@@ -85,7 +96,7 @@ export interface ActionContext {
 
   // Optional callbacks for specific actions
   onPaneUpdate?: (pane: DmuxPane) => void;
-  onPaneRemove?: (paneId: string) => void;
+  onPaneRemove?: (paneId: string) => void | Promise<void>;
   onActionResult?: (result: ActionResult) => Promise<void>;
 }
 
@@ -106,6 +117,7 @@ export enum PaneAction {
   SET_SOURCE = 'set_source',
   CLOSE = 'close',
   MERGE = 'merge',
+  CREATE_PR = 'create_pr',
   RENAME = 'rename',
   DUPLICATE = 'duplicate',
   RUN_TEST = 'run_test',
@@ -187,6 +199,14 @@ export const ACTION_REGISTRY: Record<PaneAction, ActionMetadata> = {
     description: 'Merge worktree to main branch',
     icon: '⎇',
     shortcut: 'm',
+    requires: { worktree: true },
+  },
+  [PaneAction.CREATE_PR]: {
+    id: PaneAction.CREATE_PR,
+    label: 'Create GitHub PR',
+    description: 'Push branch and create a pull request on GitHub',
+    icon: '⇱',
+    shortcut: 'p',
     requires: { worktree: true },
   },
   [PaneAction.RENAME]: {

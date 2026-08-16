@@ -4,30 +4,26 @@
 // This runs continuously without showing a command prompt
 
 import { ASCII_ART as ASCII_ART_EXPORTS } from "../utils/asciiArt.js"
+import {
+  applyDmuxTheme,
+  DECORATIVE_THEME,
+  getActiveDmuxTheme,
+} from "../theme/colors.js"
+import { normalizeDmuxTheme } from "../theme/themePalette.js"
+import { WELCOME_PANE_THEME_OPTION } from "../utils/welcomePane.js"
+import { execSync } from "child_process"
 
 // Parse the ASCII art string into an array of lines
 const ASCII_ART = ASCII_ART_EXPORTS.dmuxWelcome.trim().split("\n")
 
 const FILL_CHAR = "·"
-const ORANGE = "\x1b[38;5;208m" // ANSI 256-color orange
-const DIM_GRAY = "\x1b[38;5;238m" // Dim gray for fill dots
-const RESET = "\x1b[0m" // Reset color
+const DIM_GRAY = DECORATIVE_THEME.fill
+const RESET = DECORATIVE_THEME.reset
+const THEME_POLL_INTERVAL_MS = 120
 
 // Static drop settings
 const TAIL_LENGTH = 8 // Length of the fading tail
 const NUM_STATIC_DROPS = 150 // Number of drops to render in static view
-
-// Shades from bright to dim for the tail effect (orange)
-const SHADES = [
-  "\x1b[38;5;214m", // Bright orange
-  "\x1b[38;5;208m", // Orange
-  "\x1b[38;5;202m", // Darker orange
-  "\x1b[38;5;166m", // Even darker
-  "\x1b[38;5;130m", // Very dark orange
-  "\x1b[38;5;94m", // Brown-orange
-  "\x1b[38;5;58m", // Dark brown
-  "\x1b[38;5;236m", // Almost black
-]
 
 interface GridCell {
   char: string
@@ -73,6 +69,8 @@ function renderStaticDrops(
   grid: (GridCell | null)[][],
   height: number
 ): void {
+  const shades = DECORATIVE_THEME.tail
+
   for (const drop of drops) {
     for (let i = 0; i < drop.chars.length; i++) {
       const row = Math.floor(drop.y - i)
@@ -82,20 +80,17 @@ function renderStaticDrops(
         drop.column >= 0 &&
         drop.column < grid[row].length
       ) {
-        const shadeIndex = Math.min(i, SHADES.length - 1)
+        const shadeIndex = Math.min(i, shades.length - 1)
         grid[row][drop.column] = {
           char: drop.chars[i],
-          color: SHADES[shadeIndex],
+          color: shades[shadeIndex],
         }
       }
     }
   }
 }
 
-function render(width: number, height: number): void {
-  // Generate random static drops for this render
-  const drops = generateStaticDrops(width, height)
-
+function render(width: number, height: number, drops: StaticDrop[]): void {
   // Create a grid for the background layer (falling characters)
   const backgroundGrid: (GridCell | null)[][] = Array.from(
     { length: height },
@@ -133,7 +128,7 @@ function render(width: number, height: number): void {
         if (artCol >= 0 && artCol < trimmedArt.length) {
           const artChar = trimmedArt[artCol]
           // ASCII art takes precedence - render in orange
-          line += ORANGE + artChar + RESET
+          line += DECORATIVE_THEME.primary + artChar + RESET
         } else {
           // Outside art region - show background or fill char
           const bg = backgroundGrid[row][col]
@@ -162,26 +157,74 @@ function render(width: number, height: number): void {
   process.stdout.write(lines.join("\n"))
 }
 
-// Initial render
-const initialWidth = process.stdout.columns || 80
-const initialHeight = process.stdout.rows || 24
-render(initialWidth, initialHeight)
+function readThemeFromPaneOption(): string | undefined {
+  const paneId = process.env.TMUX_PANE
+  if (!paneId) {
+    return undefined
+  }
+
+  try {
+    const escapedPaneId = paneId.replace(/'/g, "'\\''")
+    const value = execSync(
+      `tmux show-options -p -v -t '${escapedPaneId}' ${WELCOME_PANE_THEME_OPTION}`,
+      {
+        encoding: "utf-8",
+        stdio: "pipe",
+      }
+    ).trim()
+
+    return value || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function syncThemeFromPaneOption(): boolean {
+  const configuredTheme = readThemeFromPaneOption()
+  if (!configuredTheme) {
+    return false
+  }
+
+  const nextTheme = normalizeDmuxTheme(configuredTheme)
+  if (nextTheme === getActiveDmuxTheme()) {
+    return false
+  }
+
+  applyDmuxTheme(nextTheme)
+  return true
+}
+
+let currentWidth = process.stdout.columns || 80
+let currentHeight = process.stdout.rows || 24
+let currentDrops = generateStaticDrops(currentWidth, currentHeight)
+
+syncThemeFromPaneOption()
+render(currentWidth, currentHeight, currentDrops)
 
 // Re-render only on terminal resize (static, no animation)
 process.stdout.on("resize", () => {
-  const width = process.stdout.columns || 80
-  const height = process.stdout.rows || 24
-  render(width, height)
+  currentWidth = process.stdout.columns || 80
+  currentHeight = process.stdout.rows || 24
+  currentDrops = generateStaticDrops(currentWidth, currentHeight)
+  render(currentWidth, currentHeight, currentDrops)
 })
+
+const themePoll = setInterval(() => {
+  if (syncThemeFromPaneOption()) {
+    render(currentWidth, currentHeight, currentDrops)
+  }
+}, THEME_POLL_INTERVAL_MS)
 
 // Keep the process running
 process.stdin.resume()
 
 // Handle Ctrl+C gracefully (though this pane will be killed by tmux)
 process.on("SIGINT", () => {
+  clearInterval(themePoll)
   process.exit(0)
 })
 
 process.on("SIGTERM", () => {
+  clearInterval(themePoll)
   process.exit(0)
 })

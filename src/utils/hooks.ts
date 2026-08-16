@@ -5,7 +5,7 @@
  * Hook scripts are stored in .dmux/hooks/ and receive context via environment variables.
  */
 
-import { execSync, spawn } from 'child_process';
+import { execSync, spawn, type ChildProcess } from 'child_process';
 import { existsSync, accessSync, constants, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import os from 'os';
@@ -53,6 +53,11 @@ export interface HookEnvironment {
 
   // Additional custom data
   [key: string]: string | undefined;
+}
+
+export interface HookProgressEvent {
+  stream: 'stdout' | 'stderr';
+  line: string;
 }
 
 /**
@@ -244,6 +249,143 @@ export async function triggerHookSync(
       output: error.stdout?.toString() || '',
     };
   }
+}
+
+/**
+ * Execute a blocking hook with streamed output.
+ *
+ * This is for lifecycle gates that must complete before dmux can continue,
+ * while still letting the caller surface live progress in a pane-local UI.
+ */
+export async function triggerHookWithProgress(
+  hookName: HookType,
+  projectRoot: string,
+  pane?: DmuxPane,
+  extraData?: Record<string, string>,
+  onProgress?: (event: HookProgressEvent) => void,
+  timeoutMs: number = 30000
+): Promise<{ success: boolean; output?: string; error?: string }> {
+  const hookPath = findHook(projectRoot, hookName);
+
+  if (!hookPath) {
+    return { success: true };
+  }
+
+  const env = await buildHookEnvironment(projectRoot, pane, extraData);
+  const startMsg = `Executing ${hookName} hook (streaming): ${hookPath}`;
+  LogService.getInstance().debug(startMsg, 'hooks');
+
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let stdoutRemainder = '';
+    let stderrRemainder = '';
+    let settled = false;
+
+    const flushLines = (
+      stream: 'stdout' | 'stderr',
+      chunk: string,
+      remainder: string
+    ): string => {
+      const content = remainder + chunk;
+      const lines = content.split(/\r?\n/);
+      const nextRemainder = lines.pop() || '';
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (line) {
+          onProgress?.({ stream, line });
+        }
+      }
+
+      return nextRemainder;
+    };
+
+    const finish = (result: { success: boolean; output?: string; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      if (stdoutRemainder.trim()) {
+        onProgress?.({ stream: 'stdout', line: stdoutRemainder.trim() });
+      }
+      if (stderrRemainder.trim()) {
+        onProgress?.({ stream: 'stderr', line: stderrRemainder.trim() });
+      }
+      resolve(result);
+    };
+
+    let child: ChildProcess;
+    try {
+      child = spawn(hookPath, [], {
+        env: env as NodeJS.ProcessEnv,
+        cwd: projectRoot,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      LogService.getInstance().error(
+        `${hookName} failed to start: ${errorMsg}`,
+        'hooks',
+        undefined,
+        error instanceof Error ? error : undefined
+      );
+      finish({ success: false, error: errorMsg, output: '' });
+      return;
+    }
+
+    const timeout = timeoutMs > 0
+      ? setTimeout(() => {
+          child.kill('SIGTERM');
+          finish({
+            success: false,
+            error: `${hookName} timed out after ${timeoutMs}ms`,
+            output: stdout,
+          });
+        }, timeoutMs)
+      : null;
+
+    child.stdout?.on('data', (data: Buffer) => {
+      const chunk = data.toString();
+      stdout += chunk;
+      stdoutRemainder = flushLines('stdout', chunk, stdoutRemainder);
+    });
+
+    child.stderr?.on('data', (data: Buffer) => {
+      const chunk = data.toString();
+      stderr += chunk;
+      stderrRemainder = flushLines('stderr', chunk, stderrRemainder);
+    });
+
+    child.on('error', (error) => {
+      if (timeout) clearTimeout(timeout);
+      const errorMsg = error.message || String(error);
+      LogService.getInstance().error(
+        `${hookName} failed: ${errorMsg}`,
+        'hooks',
+        undefined,
+        error instanceof Error ? error : undefined
+      );
+      finish({ success: false, error: errorMsg, output: stdout });
+    });
+
+    child.on('close', (code) => {
+      if (timeout) clearTimeout(timeout);
+      if (settled) return;
+
+      if (code === 0) {
+        LogService.getInstance().debug(`${hookName} completed successfully`, 'hooks');
+        finish({ success: true, output: stdout });
+        return;
+      }
+
+      const errorMsg = stderr.trim() || `${hookName} exited with code ${code}`;
+      LogService.getInstance().error(`${hookName} failed: ${errorMsg}`, 'hooks');
+      finish({
+        success: false,
+        error: errorMsg,
+        output: stdout,
+      });
+    });
+  });
 }
 
 /**

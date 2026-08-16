@@ -9,7 +9,13 @@ import React, { useMemo, useRef, useState } from 'react';
 import { render, Box, Text, useInput, useApp } from 'ink';
 import { PopupContainer, PopupWrapper, writeSuccessAndExit } from './shared/index.js';
 import { POPUP_CONFIG } from './config.js';
-import { resolveAgentsToLaunchOnEnter } from './agentChoiceSelection.js';
+import {
+  buildAgentLaunchCounts,
+  MAX_AGENT_LAUNCH_COUNT,
+  normalizeAgentLaunchCount,
+  resolveAgentsToLaunchOnEnter,
+  type AgentLaunchCounts,
+} from './agentChoiceSelection.js';
 import {
   getAgentLabel,
   getAgentShortLabel,
@@ -35,45 +41,79 @@ const AgentChoicePopupApp: React.FC<AgentChoicePopupProps> = ({
     );
     return firstSelectedIndex >= 0 ? firstSelectedIndex : 0;
   });
-  const [selectedAgents, setSelectedAgents] = useState<Set<AgentName>>(
-    () =>
-      new Set<AgentName>(
-        availableAgents.filter((agent) => initialSelectedAgents.includes(agent))
-      )
+  const [selectedAgentCounts, setSelectedAgentCounts] = useState<AgentLaunchCounts>(
+    () => buildAgentLaunchCounts(availableAgents, initialSelectedAgents)
   );
+  const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const selectedIndexRef = useRef(selectedIndex);
-  const selectedAgentsRef = useRef(selectedAgents);
+  const selectedAgentCountsRef = useRef(selectedAgentCounts);
   selectedIndexRef.current = selectedIndex;
-  selectedAgentsRef.current = selectedAgents;
+  selectedAgentCountsRef.current = selectedAgentCounts;
 
-  const orderedSelections = useMemo(
-    () => availableAgents.filter((agent) => selectedAgents.has(agent)),
-    [availableAgents, selectedAgents]
+  const selectedPaneCount = useMemo(
+    () => availableAgents.reduce(
+      (total, agent) => total + normalizeAgentLaunchCount(selectedAgentCounts[agent]),
+      0
+    ),
+    [availableAgents, selectedAgentCounts]
   );
-  const selectedCount = orderedSelections.length;
+  const selectedAgentKindCount = useMemo(
+    () => availableAgents.filter(
+      (agent) => normalizeAgentLaunchCount(selectedAgentCounts[agent]) > 0
+    ).length,
+    [availableAgents, selectedAgentCounts]
+  );
+  const agentLabelColumnWidth = useMemo(
+    () => availableAgents.reduce(
+      (width, agent) => Math.max(
+        width,
+        getAgentLabel(agent).length + 1 + getAgentShortLabel(agent).length
+      ),
+      0
+    ),
+    [availableAgents]
+  );
 
   const setSelectedIndexValue = (nextIndex: number) => {
     selectedIndexRef.current = nextIndex;
     setSelectedIndex(nextIndex);
   };
 
-  const setSelectedAgentsValue = (nextSelectedAgents: Set<AgentName>) => {
-    selectedAgentsRef.current = nextSelectedAgents;
-    setSelectedAgents(nextSelectedAgents);
+  const setSelectedAgentCountsValue = (nextSelectedAgentCounts: AgentLaunchCounts) => {
+    selectedAgentCountsRef.current = nextSelectedAgentCounts;
+    setValidationMessage(null);
+    setSelectedAgentCounts(nextSelectedAgentCounts);
   };
 
-  const toggleSelectedAgent = () => {
+  const setFocusedAgentCount = (nextCount: number) => {
     const agent = availableAgents[selectedIndexRef.current];
     if (!agent) return;
 
-    const next = new Set(selectedAgentsRef.current);
-    if (next.has(agent)) {
-      next.delete(agent);
+    const normalizedCount = normalizeAgentLaunchCount(nextCount);
+    const next = { ...selectedAgentCountsRef.current };
+    if (normalizedCount > 0) {
+      next[agent] = normalizedCount;
     } else {
-      next.add(agent);
+      delete next[agent];
     }
 
-    setSelectedAgentsValue(next);
+    setSelectedAgentCountsValue(next);
+  };
+
+  const adjustFocusedAgentCount = (delta: number) => {
+    const agent = availableAgents[selectedIndexRef.current];
+    if (!agent) return;
+
+    const currentCount = normalizeAgentLaunchCount(selectedAgentCountsRef.current[agent]);
+    setFocusedAgentCount(currentCount + delta);
+  };
+
+  const toggleFocusedAgent = () => {
+    const agent = availableAgents[selectedIndexRef.current];
+    if (!agent) return;
+
+    const currentCount = normalizeAgentLaunchCount(selectedAgentCountsRef.current[agent]);
+    setFocusedAgentCount(currentCount > 0 ? 0 : 1);
   };
 
   useInput((input, key) => {
@@ -96,31 +136,49 @@ const AgentChoicePopupApp: React.FC<AgentChoicePopupProps> = ({
       return;
     }
 
+    if (key.leftArrow) {
+      adjustFocusedAgentCount(-1);
+      return;
+    }
+
+    if (key.rightArrow) {
+      adjustFocusedAgentCount(1);
+      return;
+    }
+
     if (input === ' ') {
-      toggleSelectedAgent();
+      toggleFocusedAgent();
       return;
     }
 
     if (key.return) {
       const launchAgents = resolveAgentsToLaunchOnEnter(
         availableAgents,
-        selectedAgentsRef.current,
-        selectedIndexRef.current
+        selectedAgentCountsRef.current
       );
+      if (launchAgents.length === 0) {
+        setValidationMessage('Select at least one pane');
+        return;
+      }
       writeSuccessAndExit(resultFile, launchAgents, exit);
     }
   });
 
   return (
     <PopupWrapper resultFile={resultFile}>
-      <PopupContainer footer="↑↓ navigate • Space toggle • Enter launch • ESC cancel">
-        <Box marginBottom={1}>
+      <PopupContainer footer="↑↓ navigate • ←/→ count • Space 1x/0x • Enter launch • ESC cancel">
+        <Box flexDirection="column" marginBottom={1}>
           <Text dimColor>
-            Space toggles selection. Enter launches selected agents, or the focused agent if none are selected.
+            Space toggles 1x/0x. Left/right changes count up to {MAX_AGENT_LAUNCH_COUNT}x.
           </Text>
           <Text color={POPUP_CONFIG.titleColor}>
-            Selected: {selectedCount}/{availableAgents.length}
+            Panes: {selectedPaneCount} • Agents: {selectedAgentKindCount}/{availableAgents.length}
           </Text>
+          {validationMessage && (
+            <Text color={POPUP_CONFIG.errorColor}>
+              {validationMessage}
+            </Text>
+          )}
         </Box>
 
         <Box flexDirection="column">
@@ -129,25 +187,49 @@ const AgentChoicePopupApp: React.FC<AgentChoicePopupProps> = ({
           )}
           {availableAgents.map((agent, index) => {
             const isSelectedRow = index === selectedIndex;
-            const isChecked = selectedAgents.has(agent);
-            const marker = isChecked ? '◉' : '◎';
-            const markerColor = isChecked ? POPUP_CONFIG.successColor : 'white';
+            const count = normalizeAgentLaunchCount(selectedAgentCounts[agent]);
+            const isChecked = count > 0;
+            const label = getAgentLabel(agent);
+            const shortLabel = getAgentShortLabel(agent);
+            const labelWidth = label.length + 1 + shortLabel.length;
+            const spacer = ' '.repeat(Math.max(2, agentLabelColumnWidth - labelWidth + 3));
+            const filledSlots = '■'.repeat(count);
+            const emptySlots = ' '.repeat(MAX_AGENT_LAUNCH_COUNT - count);
+            const countText = `${count}x`;
+            const countColor = isChecked ? POPUP_CONFIG.successColor : 'gray';
 
             return (
               <Box key={agent}>
-                <Text color={markerColor} bold={isChecked}>
-                  {marker}
+                <Text color={isSelectedRow ? POPUP_CONFIG.titleColor : 'gray'} bold={isSelectedRow}>
+                  {isSelectedRow ? '›' : ' '}
                 </Text>
                 <Text
                   color={isSelectedRow ? POPUP_CONFIG.titleColor : 'white'}
                   bold={isSelectedRow}
                 >
                   {' '}
-                  {getAgentLabel(agent)}
+                  {label}
                 </Text>
                 <Text color={isSelectedRow ? POPUP_CONFIG.titleColor : 'gray'}>
                   {' '}
-                  {getAgentShortLabel(agent)}
+                  {shortLabel}
+                </Text>
+                <Text>{spacer}</Text>
+                <Text color={isSelectedRow ? POPUP_CONFIG.titleColor : 'gray'}>
+                  [
+                </Text>
+                <Text color={POPUP_CONFIG.successColor} bold={isChecked}>
+                  {filledSlots}
+                </Text>
+                <Text>
+                  {emptySlots}
+                </Text>
+                <Text color={isSelectedRow ? POPUP_CONFIG.titleColor : 'gray'}>
+                  ]
+                </Text>
+                <Text color={countColor} bold={isSelectedRow || isChecked}>
+                  {' '}
+                  {countText}
                 </Text>
               </Box>
             );

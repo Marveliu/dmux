@@ -4,14 +4,21 @@
  * after dmux exits intentionally.
  */
 
+import { sanitizePathForInstalledDmux } from './pathEnvironment.js';
+
 const escapeForDoubleQuotedShell = (value: string): string =>
   value.replace(/([\\$"`])/g, "\\$1");
 
+const shellQuote = (value: string): string =>
+  `'${value.replace(/'/g, `'\\''`)}'`;
+
 export function buildDevWatchCommand(sourcePath: string): string {
   const escapedPath = escapeForDoubleQuotedShell(sourcePath);
-  return `cd "${escapedPath}" && pnpm dev:watch`;
+  const cleanPath = sanitizePathForInstalledDmux(process.env.PATH || '', sourcePath);
+  return `cd "${escapedPath}" && env PATH=${shellQuote(cleanPath)} pnpm dev:watch`;
 }
 
 export function buildDevWatchRespawnCommand(sourcePath: string): string {
-  return `${buildDevWatchCommand(sourcePath)}; exec "\${SHELL:-/bin/zsh}" -l`;
+  const cleanPath = sanitizePathForInstalledDmux(process.env.PATH || '', sourcePath);
+  return `${buildDevWatchCommand(sourcePath)}; exec env PATH=${shellQuote(cleanPath)} "\${SHELL:-/bin/zsh}" -l`;
 }

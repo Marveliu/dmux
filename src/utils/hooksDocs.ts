@@ -99,30 +99,40 @@ This directory is **version controlled**. Hooks you create here will be shared w
 export const EXAMPLE_WORKTREE_CREATED = `#!/bin/bash
 # Example: worktree_created hook
 #
-# This hook runs after a new worktree is created and the agent is launched.
+# This hook runs after a new worktree is created and before the agent launches.
 # Use it to set up the worktree environment (install deps, copy configs, etc.)
+# Stdout/stderr is streamed into the new pane's setup UI while this hook runs.
+# dmux waits for this hook without a fixed timeout.
 
 set -e  # Exit on error
 
-echo "[Hook] Setting up worktree: $DMUX_SLUG"
+status() {
+  if [ "\${DMUX_PROGRESS:-0}" = "1" ]; then
+    echo "\${DMUX_STATUS_PREFIX:-DMUX_STATUS:} $*"
+  else
+    echo "[Hook] $*"
+  fi
+}
+
+status "Setting up worktree: $DMUX_SLUG"
 
 cd "$DMUX_WORKTREE_PATH"
 
-# Install dependencies in background (don't block dmux)
+# Install dependencies before the agent launches.
 if [ -f "pnpm-lock.yaml" ]; then
-  echo "[Hook] Installing dependencies with pnpm..."
-  pnpm install --prefer-offline &
+  status "Installing dependencies with pnpm"
+  pnpm install --prefer-offline
 elif [ -f "package-lock.json" ]; then
-  echo "[Hook] Installing dependencies with npm..."
-  npm install &
+  status "Installing dependencies with npm"
+  npm install
 elif [ -f "yarn.lock" ]; then
-  echo "[Hook] Installing dependencies with yarn..."
-  yarn install &
+  status "Installing dependencies with yarn"
+  yarn install
 fi
 
 # Copy environment file if it exists
 if [ -f "$DMUX_ROOT/.env.local" ]; then
-  echo "[Hook] Copying .env.local"
+  status "Copying .env.local"
   cp "$DMUX_ROOT/.env.local" "$DMUX_WORKTREE_PATH/.env.local"
 fi
 
@@ -133,7 +143,7 @@ fi
 echo "[\$(date)] Created worktree: $DMUX_SLUG | Agent: $DMUX_AGENT | Prompt: $DMUX_PROMPT" \\
   >> "$DMUX_ROOT/.dmux/worktree_history.log"
 
-echo "[Hook] Worktree setup complete!"
+status "Worktree setup complete"
 `;
 
 /**

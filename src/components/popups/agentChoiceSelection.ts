@@ -1,23 +1,49 @@
 import type { AgentName } from '../../utils/agentLaunch.js';
 
+export const MAX_AGENT_LAUNCH_COUNT = 3;
+
+export type AgentLaunchCounts = Partial<Record<AgentName, number>>;
+
+export function normalizeAgentLaunchCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(MAX_AGENT_LAUNCH_COUNT, Math.trunc(value)));
+}
+
+export function buildAgentLaunchCounts(
+  availableAgents: AgentName[],
+  selectedAgents: readonly AgentName[]
+): AgentLaunchCounts {
+  const availableAgentSet = new Set(availableAgents);
+  const counts: AgentLaunchCounts = {};
+
+  for (const agent of selectedAgents) {
+    if (!availableAgentSet.has(agent)) {
+      continue;
+    }
+
+    const currentCount = normalizeAgentLaunchCount(counts[agent]);
+    if (currentCount < MAX_AGENT_LAUNCH_COUNT) {
+      counts[agent] = currentCount + 1;
+    }
+  }
+
+  return counts;
+}
+
 /**
  * Enter-key behavior for multi-agent popup:
- * - If at least one agent is selected, launch selected agents.
- * - If none are selected, launch the focused row.
+ * - Launch the expanded selected counts in visible agent order.
+ * - Return an empty list when the user has selected 0 panes.
  */
 export function resolveAgentsToLaunchOnEnter(
   availableAgents: AgentName[],
-  selectedAgents: ReadonlySet<AgentName>,
-  focusedIndex: number
+  selectedAgentCounts: Readonly<AgentLaunchCounts>
 ): AgentName[] {
-  const orderedSelections = availableAgents.filter((agent) =>
-    selectedAgents.has(agent)
-  );
-
-  if (orderedSelections.length > 0) {
-    return orderedSelections;
-  }
-
-  const focusedAgent = availableAgents[focusedIndex];
-  return focusedAgent ? [focusedAgent] : [];
+  return availableAgents.flatMap((agent) => {
+    const count = normalizeAgentLaunchCount(selectedAgentCounts[agent]);
+    return Array.from({ length: count }, () => agent);
+  });
 }

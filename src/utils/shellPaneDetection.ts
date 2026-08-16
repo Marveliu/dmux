@@ -8,6 +8,7 @@ import type { DmuxPane } from '../types.js';
 import { LogService } from '../services/LogService.js';
 import { TmuxService } from '../services/TmuxService.js';
 import { resolveProjectRootFromPath } from './projectRoot.js';
+import { DMUX_BOOTSTRAP_PANE_TITLE_PREFIX } from './paneBootstrapConfig.js';
 
 /**
  * Detects the shell type running in a tmux pane
@@ -122,6 +123,9 @@ export async function getUntrackedPanes(
       if (title === 'dmux-spacer') {
         continue;
       }
+      if (title && title.startsWith(DMUX_BOOTSTRAP_PANE_TITLE_PREFIX)) {
+        continue;
+      }
       if (title && title.startsWith('dmux v')) {
         continue;
       }
@@ -156,7 +160,7 @@ export async function getUntrackedPanes(
 
 async function detectPaneProjectInfo(
   paneId: string
-): Promise<{ projectRoot?: string; projectName?: string }> {
+): Promise<{ projectRoot?: string; projectName?: string; currentPath?: string }> {
   try {
     const { execSync } = await import('child_process');
     const panePath = execSync(
@@ -172,6 +176,7 @@ async function detectPaneProjectInfo(
     return {
       projectRoot: resolved.projectRoot,
       projectName: resolved.projectName,
+      currentPath: panePath,
     };
   } catch {
     return {};
@@ -215,6 +220,7 @@ export async function createShellPane(paneId: string, nextId: number, existingTi
     projectName: paneProjectInfo.projectName,
     type: 'shell',
     shellType,
+    shellCwd: paneProjectInfo.currentPath || paneProjectInfo.projectRoot,
   };
 }
 

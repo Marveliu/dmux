@@ -25,6 +25,8 @@ interface AttentionCandidate {
 
 interface DmuxAttentionServiceOptions {
   focusService: DmuxFocusService;
+  notificationsEnabled?: () => boolean;
+  idleNotificationCooldownMs?: number;
 }
 
 export interface PaneAttentionChangedEvent {
@@ -34,17 +36,23 @@ export interface PaneAttentionChangedEvent {
 }
 
 export class DmuxAttentionService extends EventEmitter {
+  private static readonly DEFAULT_IDLE_NOTIFICATION_COOLDOWN_MS = 2 * 60 * 1000;
+
   private readonly logger = LogService.getInstance();
   private readonly statusDetector = getStatusDetector();
   private readonly candidates = new Map<string, AttentionCandidate>();
   private readonly notifiedFingerprints = new Map<string, string>();
+  private readonly lastIdleNotificationAt = new Map<string, number>();
   private readonly baselineFingerprints = new Map<string, string>();
   private readonly armedPanes = new Set<string>();
   private readonly activeAttentionPanes = new Map<string, string>();
+  private readonly idleNotificationCooldownMs: number;
   private active = false;
 
   constructor(private readonly options: DmuxAttentionServiceOptions) {
     super();
+    this.idleNotificationCooldownMs = options.idleNotificationCooldownMs
+      ?? DmuxAttentionService.DEFAULT_IDLE_NOTIFICATION_COOLDOWN_MS;
   }
 
   start(): void {
@@ -79,6 +87,7 @@ export class DmuxAttentionService extends EventEmitter {
     }
     this.candidates.clear();
     this.notifiedFingerprints.clear();
+    this.lastIdleNotificationAt.clear();
     this.baselineFingerprints.clear();
     this.armedPanes.clear();
     this.activeAttentionPanes.clear();
@@ -98,10 +107,15 @@ export class DmuxAttentionService extends EventEmitter {
   };
 
   private readonly handleUserInteraction = (event: PaneUserInteractionEvent): void => {
-    this.resetPaneAttention(event.paneId);
+    this.resetPaneAttention(event.paneId, { clearNotificationCooldown: true });
   };
 
   private readonly handleAttentionNeeded = (event: AttentionNeededEvent): void => {
+    if (!this.areNotificationsEnabled()) {
+      this.resetPaneAttention(event.paneId);
+      return;
+    }
+
     this.candidates.set(event.paneId, {
       paneId: event.paneId,
       tmuxPaneId: event.tmuxPaneId,
@@ -116,6 +130,13 @@ export class DmuxAttentionService extends EventEmitter {
   };
 
   private readonly handleFocusChanged = (_event: DmuxFocusChangedEvent): void => {
+    if (!this.areNotificationsEnabled()) {
+      for (const paneId of this.candidates.keys()) {
+        this.resetPaneAttention(paneId);
+      }
+      return;
+    }
+
     for (const paneId of this.candidates.keys()) {
       void this.maybeNotify(paneId);
     }
@@ -123,6 +144,11 @@ export class DmuxAttentionService extends EventEmitter {
 
   private async maybeNotify(paneId: string): Promise<void> {
     if (!this.active) {
+      return;
+    }
+
+    if (!this.areNotificationsEnabled()) {
+      this.resetPaneAttention(paneId);
       return;
     }
 
@@ -156,7 +182,30 @@ export class DmuxAttentionService extends EventEmitter {
       return;
     }
 
+    const activeAttentionPaneId = this.activeAttentionPanes.get(paneId);
+    if (activeAttentionPaneId) {
+      if (activeAttentionPaneId !== candidate.tmuxPaneId) {
+        this.setPaneAttention(paneId, candidate.tmuxPaneId, true);
+      }
+
+      this.baselineFingerprints.delete(paneId);
+      this.notifiedFingerprints.set(paneId, candidate.fingerprint);
+      return;
+    }
+
     if (this.notifiedFingerprints.get(paneId) === candidate.fingerprint) {
+      return;
+    }
+
+    if (this.shouldSuppressIdleNotificationForCooldown(candidate)) {
+      this.logger.debug(
+        `Suppressing idle attention notification for ${paneId} during cooldown`,
+        'attentionService',
+        paneId
+      );
+      this.setPaneAttention(paneId, candidate.tmuxPaneId, true);
+      this.baselineFingerprints.delete(paneId);
+      this.notifiedFingerprints.set(paneId, candidate.fingerprint);
       return;
     }
 
@@ -165,6 +214,7 @@ export class DmuxAttentionService extends EventEmitter {
       this.setPaneAttention(paneId, candidate.tmuxPaneId, true);
       this.baselineFingerprints.delete(paneId);
       this.notifiedFingerprints.set(paneId, candidate.fingerprint);
+      this.recordIdleNotification(candidate);
       return;
     }
 
@@ -187,14 +237,40 @@ export class DmuxAttentionService extends EventEmitter {
     this.setPaneAttention(paneId, candidate.tmuxPaneId, true);
     this.baselineFingerprints.delete(paneId);
     this.notifiedFingerprints.set(paneId, candidate.fingerprint);
+    this.recordIdleNotification(candidate);
   }
 
-  private resetPaneAttention(paneId: string): void {
+  private resetPaneAttention(
+    paneId: string,
+    options: { clearNotificationCooldown?: boolean } = {}
+  ): void {
     this.setPaneAttention(paneId, undefined, false);
     this.candidates.delete(paneId);
     this.notifiedFingerprints.delete(paneId);
     this.baselineFingerprints.delete(paneId);
     this.armedPanes.delete(paneId);
+    if (options.clearNotificationCooldown) {
+      this.lastIdleNotificationAt.delete(paneId);
+    }
+  }
+
+  private shouldSuppressIdleNotificationForCooldown(candidate: AttentionCandidate): boolean {
+    if (candidate.status !== 'idle' || this.idleNotificationCooldownMs <= 0) {
+      return false;
+    }
+
+    const lastNotificationAt = this.lastIdleNotificationAt.get(candidate.paneId);
+    if (lastNotificationAt === undefined) {
+      return false;
+    }
+
+    return Date.now() - lastNotificationAt < this.idleNotificationCooldownMs;
+  }
+
+  private recordIdleNotification(candidate: AttentionCandidate): void {
+    if (candidate.status === 'idle') {
+      this.lastIdleNotificationAt.set(candidate.paneId, Date.now());
+    }
   }
 
   private setPaneAttention(
@@ -238,5 +314,9 @@ export class DmuxAttentionService extends EventEmitter {
       tmuxPaneId: currentTmuxPaneId,
       needsAttention: false,
     } satisfies PaneAttentionChangedEvent);
+  }
+
+  private areNotificationsEnabled(): boolean {
+    return this.options.notificationsEnabled?.() ?? true;
   }
 }

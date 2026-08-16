@@ -21,6 +21,7 @@ interface WorkerConfig {
 
 interface PaneSnapshot {
   paneIds: string[];
+  activePaneId: string | null;
   timestamp: number;
 }
 
@@ -49,6 +50,20 @@ function getPaneIds(): string[] {
   }
 }
 
+function getActivePaneId(): string | null {
+  try {
+    const output = execSync('tmux list-panes -F "#{pane_id} #{pane_active}"', {
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: 2000,
+    });
+    const activeLine = output.trim().split('\n').find((line) => line.endsWith(' 1'));
+    return activeLine ? activeLine.split(' ')[0] : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Compare two snapshots and detect changes
  */
@@ -56,9 +71,10 @@ function detectChanges(oldSnapshot: PaneSnapshot | null, newSnapshot: PaneSnapsh
   added: string[];
   removed: string[];
   changed: boolean;
+  focusChanged: boolean;
 } {
   if (!oldSnapshot) {
-    return { added: [], removed: [], changed: false };
+    return { added: [], removed: [], changed: false, focusChanged: false };
   }
 
   const oldSet = new Set(oldSnapshot.paneIds);
@@ -67,8 +83,9 @@ function detectChanges(oldSnapshot: PaneSnapshot | null, newSnapshot: PaneSnapsh
   const added = newSnapshot.paneIds.filter(id => !oldSet.has(id));
   const removed = oldSnapshot.paneIds.filter(id => !newSet.has(id));
   const changed = added.length > 0 || removed.length > 0;
+  const focusChanged = oldSnapshot.activePaneId !== newSnapshot.activePaneId;
 
-  return { added, removed, changed };
+  return { added, removed, changed, focusChanged };
 }
 
 /**
@@ -78,8 +95,10 @@ async function poll(): Promise<void> {
   while (isRunning) {
     try {
       const paneIds = getPaneIds();
+      const activePaneId = getActivePaneId();
       const newSnapshot: PaneSnapshot = {
         paneIds,
+        activePaneId,
         timestamp: Date.now(),
       };
 
@@ -92,6 +111,14 @@ async function poll(): Promise<void> {
           added: changes.added,
           removed: changes.removed,
           paneIds: paneIds,
+          timestamp: newSnapshot.timestamp,
+        });
+      }
+
+      if (changes.focusChanged) {
+        parentPort?.postMessage({
+          type: 'pane-focus-changed',
+          activePaneId,
           timestamp: newSnapshot.timestamp,
         });
       }
@@ -131,11 +158,18 @@ parentPort?.on('message', (message: { type: string; pollInterval?: number }) => 
     case 'force-poll':
       // Force an immediate poll
       const paneIds = getPaneIds();
+      const activePaneId = getActivePaneId();
       parentPort?.postMessage({
         type: 'panes-changed',
         added: [],
         removed: [],
         paneIds,
+        timestamp: Date.now(),
+        forced: true,
+      });
+      parentPort?.postMessage({
+        type: 'pane-focus-changed',
+        activePaneId,
         timestamp: Date.now(),
         forced: true,
       });

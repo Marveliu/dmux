@@ -20,6 +20,16 @@ describe('pane status monitoring eligibility', () => {
     ).toBe(false);
   });
 
+  it('monitors shell panes while a manually launched agent is active', () => {
+    expect(
+      shouldMonitorPaneForStatusTracking({
+        type: 'shell',
+        agent: 'claude',
+        activeAgent: 'claude',
+      })
+    ).toBe(true);
+  });
+
   it('does not monitor worktree panes without an attached agent', () => {
     expect(
       shouldMonitorPaneForStatusTracking({

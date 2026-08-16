@@ -5,9 +5,11 @@ import {
   getAgentShortLabel,
   appendSlugSuffix,
   buildAgentCommand,
+  buildAgentLaunchInstances,
   buildAgentLaunchOptions,
   buildInitialPromptCommand,
   buildResumeCommand,
+  buildAgentResumeOrLaunchCommand,
   getDefaultEnabledAgents,
   getAgentSlugSuffix,
   getPermissionFlags,
@@ -15,6 +17,9 @@ import {
   getSendKeysPrePrompt,
   getSendKeysReadyDelayMs,
   getSendKeysSubmit,
+  buildGoalModePrompt,
+  shouldEnableCodexGoals,
+  supportsAgentGoalMode,
 } from '../src/utils/agentLaunch.js';
 
 describe('agent launch utils', () => {
@@ -27,11 +32,19 @@ describe('agent launch utils', () => {
     expect(getAgentSlugSuffix('claude')).toBe('claude-code');
     expect(getAgentSlugSuffix('opencode')).toBe('opencode');
     expect(getAgentSlugSuffix('codex')).toBe('codex');
+    expect(getAgentSlugSuffix('grok')).toBe('grok-build');
     expect(getAgentSlugSuffix('gemini')).toBe('gemini');
   });
 
   it('returns default-enabled registry agents', () => {
-    expect(getDefaultEnabledAgents()).toEqual(['claude', 'opencode', 'codex']);
+    expect(getDefaultEnabledAgents()).toEqual(['claude', 'opencode', 'codex', 'grok']);
+  });
+
+  it('reports native goal-mode support for Claude and Codex only', () => {
+    expect(supportsAgentGoalMode('claude')).toBe(true);
+    expect(supportsAgentGoalMode('codex')).toBe(true);
+    expect(supportsAgentGoalMode('grok')).toBe(false);
+    expect(supportsAgentGoalMode('opencode')).toBe(false);
   });
 
   it('builds single-agent options from available agents', () => {
@@ -49,6 +62,41 @@ describe('agent launch utils', () => {
       'claude',
       'opencode',
       'codex',
+    ]);
+  });
+
+  it('preserves duplicate agent launches and adds cardinal slug suffixes', () => {
+    const launches = buildAgentLaunchInstances(['codex', 'codex', 'grok']);
+    expect(launches).toEqual([
+      {
+        agent: 'codex',
+        ordinal: 1,
+        totalForAgent: 2,
+        slugSuffix: 'codex-1',
+      },
+      {
+        agent: 'codex',
+        ordinal: 2,
+        totalForAgent: 2,
+        slugSuffix: 'codex-2',
+      },
+      {
+        agent: 'grok',
+        ordinal: 1,
+        totalForAgent: 1,
+        slugSuffix: 'grok-build',
+      },
+    ]);
+  });
+
+  it('omits launch suffixes for single-agent launches', () => {
+    expect(buildAgentLaunchInstances(['grok'])).toEqual([
+      {
+        agent: 'grok',
+        ordinal: 1,
+        totalForAgent: 1,
+        slugSuffix: undefined,
+      },
     ]);
   });
 
@@ -115,6 +163,14 @@ describe('getPermissionFlags', () => {
     });
   });
 
+  describe('grok', () => {
+    it('returns plan/accept/bypass permission flags', () => {
+      expect(getPermissionFlags('grok', 'plan')).toBe('--permission-mode plan');
+      expect(getPermissionFlags('grok', 'acceptEdits')).toBe('--permission-mode acceptEdits');
+      expect(getPermissionFlags('grok', 'bypassPermissions')).toBe('--always-approve');
+    });
+  });
+
   describe('qwen', () => {
     it('returns plan/accept/bypass permission flags', () => {
       expect(getPermissionFlags('qwen', 'plan')).toBe('--approval-mode plan');
@@ -177,9 +233,62 @@ describe('command builders', () => {
     );
   });
 
+  it('uses send-keys startup mode for grok initial prompts', () => {
+    expect(getPromptTransport('grok')).toBe('send-keys');
+    expect(buildInitialPromptCommand('grok', '"fix it"', 'bypassPermissions')).toBe(
+      'grok --always-approve'
+    );
+    expect(getSendKeysSubmit('grok')).toEqual(['Enter']);
+    expect(getSendKeysPostPasteDelayMs('grok')).toBe(150);
+    expect(getSendKeysReadyDelayMs('grok')).toBe(1600);
+  });
+
+  it('builds grok resume command scoped to the current directory', () => {
+    expect(buildResumeCommand('grok', 'bypassPermissions')).toBe(
+      'grok --continue --always-approve'
+    );
+  });
+
   it('builds gemini resume command', () => {
     expect(buildResumeCommand('gemini', 'bypassPermissions')).toBe(
       'gemini --resume latest --approval-mode yolo'
+    );
+  });
+
+  it('builds codex resume command with per-agent permissions', () => {
+    expect(buildResumeCommand('codex', 'bypassPermissions')).toBe(
+      'codex resume --last --dangerously-bypass-approvals-and-sandbox'
+    );
+  });
+
+  it('uses an exact session ID when the agent supports it', () => {
+    expect(buildResumeCommand(
+      'codex',
+      'bypassPermissions',
+      'abcdefab-1234-5678-9abc-abcdefabcdef'
+    )).toBe(
+      "codex resume 'abcdefab-1234-5678-9abc-abcdefabcdef' --dangerously-bypass-approvals-and-sandbox"
+    );
+    expect(buildResumeCommand(
+      'claude',
+      undefined,
+      '12345678-1234-1234-1234-123456789abc'
+    )).toBe("claude --resume '12345678-1234-1234-1234-123456789abc'");
+  });
+
+  it('wraps supported initial prompts in /goal when goal mode is enabled', () => {
+    expect(buildGoalModePrompt('claude', 'fix the failing test', true)).toBe(
+      '/goal fix the failing test'
+    );
+    expect(buildGoalModePrompt('codex', 'ship it', true)).toBe('/goal ship it');
+    expect(buildGoalModePrompt('opencode', 'ship it', true)).toBe('ship it');
+    expect(shouldEnableCodexGoals('codex', true)).toBe(true);
+    expect(shouldEnableCodexGoals('claude', true)).toBe(false);
+  });
+
+  it('falls back to launch command when an agent has no resume template', () => {
+    expect(buildAgentResumeOrLaunchCommand('opencode', 'bypassPermissions')).toBe(
+      'opencode'
     );
   });
 });

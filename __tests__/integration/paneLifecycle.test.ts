@@ -16,7 +16,7 @@ import {
   addWorktree,
   type MockGitRepo,
 } from '../fixtures/integration/gitRepo.js';
-import { createMockExecSync, createMockOpenRouterAPI } from '../helpers/integration/mockCommands.js';
+import { createMockExecSync } from '../helpers/integration/mockCommands.js';
 
 const fsMock = vi.hoisted(() => ({
   readFileSync: vi.fn(() => JSON.stringify({ controlPaneId: '%0' })),
@@ -24,6 +24,7 @@ const fsMock = vi.hoisted(() => ({
   existsSync: vi.fn(),
   mkdirSync: vi.fn(),
 }));
+const destroyWelcomePaneCoordinatedMock = vi.hoisted(() => vi.fn());
 
 // Mock child_process
 const mockExecSync = createMockExecSync({});
@@ -32,7 +33,7 @@ vi.mock('child_process', () => ({
 }));
 
 // Mock StateManager
-const mockGetPanes = vi.fn(() => []);
+const mockGetPanes = vi.fn((): DmuxPane[] => []);
 const mockSetPanes = vi.fn();
 const mockGetState = vi.fn(() => ({ projectRoot: '/test' }));
 const mockPauseConfigWatcher = vi.fn();
@@ -52,6 +53,8 @@ vi.mock('../../src/shared/StateManager.js', () => ({
 // Mock hooks
 vi.mock('../../src/utils/hooks.js', () => ({
   triggerHook: vi.fn(() => Promise.resolve()),
+  triggerHookSync: vi.fn(() => Promise.resolve({ success: true })),
+  initializeHooksDirectory: vi.fn(),
 }));
 
 // Mock LogService
@@ -75,16 +78,39 @@ vi.mock('../../src/services/WorktreeCleanupService.js', () => ({
   },
 }));
 
+vi.mock('../../src/utils/welcomePaneManager.js', () => ({
+  destroyWelcomePaneCoordinated: destroyWelcomePaneCoordinatedMock,
+}));
+
 // Mock fs for reading config
 vi.mock('fs', () => ({
   default: fsMock,
   ...fsMock,
 }));
 
+const getBootstrapWrites = () =>
+  fsMock.writeFileSync.mock.calls.filter(([target]) =>
+    String(target).includes('/.dmux/bootstrap/')
+  );
+
+const getLatestBootstrapConfig = () => {
+  const write = getBootstrapWrites().at(-1);
+  if (!write) {
+    throw new Error('No bootstrap config was written');
+  }
+  return JSON.parse(String(write[1]));
+};
+
+const getSendKeysCommands = () =>
+  mockExecSync.mock.calls
+    .map(([cmd]) => (typeof cmd === 'string' ? cmd : ''))
+    .filter((cmd) => cmd.includes('send-keys'));
+
 describe('Pane Lifecycle Integration Tests', () => {
   let tmuxSession: MockTmuxSession;
   let gitRepo: MockGitRepo;
   let createdWorktreePaths: Set<string>;
+  let killedPaneIds: Set<string>;
 
   beforeEach(() => {
     // Reset all mocks
@@ -95,6 +121,7 @@ describe('Pane Lifecycle Integration Tests', () => {
     tmuxSession = createMockTmuxSession('dmux-test', 1);
     gitRepo = createMockGitRepo('main');
     createdWorktreePaths = new Set<string>();
+    killedPaneIds = new Set<string>();
 
     fsMock.existsSync.mockImplementation((target) => {
       const value = String(target);
@@ -105,7 +132,7 @@ describe('Pane Lifecycle Integration Tests', () => {
     });
 
     // Configure mock execSync with test data
-    mockExecSync.mockImplementation((command: string, options?: any) => {
+    mockExecSync.mockImplementation(((command: string, options?: any) => {
       const cmd = command.toString().trim();
       const encoding = options?.encoding;
 
@@ -117,14 +144,43 @@ describe('Pane Lifecycle Integration Tests', () => {
         return Buffer.from(value);
       };
 
-      // Tmux display-message (get current pane id)
+      if (cmd.includes('claude --no-interactive') && cmd.includes('Generate a 1-2 word kebab-case slug')) {
+        if (cmd.includes('add user dashboard')) {
+          return returnValue('add-user');
+        }
+        return returnValue('');
+      }
+
+      // Tmux display-message (get current pane id or session name)
       if (cmd.includes('display-message')) {
+        if (cmd.includes('#{session_name}')) {
+          return returnValue('dmux-test');
+        }
         return returnValue('%0');
       }
 
       // Tmux list-panes
       if (cmd.includes('list-panes')) {
-        return returnValue('%0:dmux-control:80x24\n%1:test:80x24');
+        return returnValue(
+          [
+            '%0:dmux-control:80x24',
+            '%1:test:80x24',
+          ]
+            .filter((line) => {
+              const paneId = line.match(/^%\d+/)?.[0];
+              return paneId && !killedPaneIds.has(paneId);
+            })
+            .join('\n')
+        );
+      }
+
+      // Tmux kill-pane
+      if (cmd.includes('kill-pane')) {
+        const paneId = cmd.match(/-t '([^']+)'/)?.[1];
+        if (paneId) {
+          killedPaneIds.add(paneId);
+        }
+        return returnValue('');
       }
 
       // Tmux split-window
@@ -154,12 +210,17 @@ describe('Pane Lifecycle Integration Tests', () => {
         );
       }
 
+      // Branch existence checks for new-worktree branch creation.
+      // Default to "missing" so createPane uses -b path unless a test overrides behavior.
+      if (cmd.includes('show-ref --verify --quiet')) {
+        throw new Error('branch not found');
+      }
+
       // Git symbolic-ref (main branch)
       if (cmd.includes('symbolic-ref')) {
         return returnValue('refs/heads/main');
       }
 
-      // Git rev-parse (current branch)
       if (cmd.includes('rev-parse --git-common-dir')) {
         return returnValue('.git');
       }
@@ -168,13 +229,18 @@ describe('Pane Lifecycle Integration Tests', () => {
         return returnValue('/test');
       }
 
+      if (cmd.includes('rev-parse --verify')) {
+        return returnValue('abc123');
+      }
+
+      // Git rev-parse (current branch)
       if (cmd.includes('rev-parse')) {
         return returnValue('main');
       }
 
       // Default
       return returnValue('');
-    });
+    }) as any);
 
     // Configure StateManager mock
     mockGetPanes.mockReturnValue([]);
@@ -208,7 +274,31 @@ describe('Pane Lifecycle Integration Tests', () => {
       }
     });
 
-    it('should create git worktree with branch', async () => {
+    it('should scope pane border status to the current tmux session', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await createPane(
+        {
+          prompt: 'scope pane borders',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+        },
+        ['claude']
+      );
+
+      expect(mockExecSync.mock.calls.some(([cmd]) =>
+        typeof cmd === 'string'
+        && cmd.includes('tmux set -t dmux-test pane-border-status top')
+      )).toBe(true);
+
+      expect(mockExecSync.mock.calls.some(([cmd]) =>
+        typeof cmd === 'string'
+        && cmd.includes('tmux set-option -g pane-border-status top')
+      )).toBe(false);
+    });
+
+    it('should delegate git worktree creation to the pane bootstrap runner', async () => {
       const { createPane } = await import('../../src/utils/paneCreation.js');
 
       await createPane(
@@ -221,11 +311,85 @@ describe('Pane Lifecycle Integration Tests', () => {
         ['claude']
       );
 
-      // Verify git worktree add was called
-      expect(mockExecSync).toHaveBeenCalledWith(
-        expect.stringContaining('git worktree add'),
-        expect.any(Object)
+      const bootstrapConfig = getLatestBootstrapConfig();
+      expect(bootstrapConfig.worktreePath).toMatch(/^\/test\/\.dmux\/worktrees\/add-user/);
+      expect(bootstrapConfig.branchName).toMatch(/^add-user/);
+      expect(bootstrapConfig.existingWorktree).toBe(false);
+
+      expect(getSendKeysCommands().some((cmd) =>
+        cmd.includes('paneBootstrapRunner')
+      )).toBe(true);
+
+      expect(mockExecSync.mock.calls.some(([cmd]) =>
+        typeof cmd === 'string' && cmd.includes('git worktree add')
+      )).toBe(false);
+    });
+
+    it('passes remote tracking baseBranch values to bootstrap without forcing refs/heads', async () => {
+      fsMock.readFileSync.mockImplementation((target) => {
+        const value = String(target);
+        if (value.endsWith('/.dmux/settings.json')) {
+          return JSON.stringify({ baseBranch: 'origin/main' });
+        }
+        if (value.endsWith('/.dmux/dmux.config.json')) {
+          return JSON.stringify({ controlPaneId: '%0' });
+        }
+        return JSON.stringify({});
+      });
+
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await createPane(
+        {
+          prompt: 'branch from remote main',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          slugBase: 'remote-base',
+        },
+        ['claude']
       );
+
+      const bootstrapConfig = getLatestBootstrapConfig();
+      expect(bootstrapConfig.resolvedStartPoint).toBe('origin/main');
+
+      expect(mockExecSync.mock.calls.some(([cmd]) =>
+        typeof cmd === 'string'
+        && cmd.includes('refs/heads/origin/main')
+      )).toBe(false);
+    });
+
+    it('should attach a fresh pane to an existing worktree without recreating it', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+      const existingWorktreePath = '/test/.dmux/worktrees/resume-me';
+      createdWorktreePaths.add(existingWorktreePath);
+      createdWorktreePaths.add(`${existingWorktreePath}/.git`);
+
+      const result = await createPane(
+        {
+          prompt: '',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          existingWorktree: {
+            slug: 'resume-me',
+            worktreePath: existingWorktreePath,
+            branchName: 'feature/resume-me',
+          },
+        },
+        ['claude']
+      );
+
+      expect(mockExecSync.mock.calls.some(([cmd]) =>
+        typeof cmd === 'string' && cmd.includes(`git worktree add "${existingWorktreePath}"`)
+      )).toBe(false);
+
+      if ('pane' in result) {
+        expect(result.pane.slug).toBe('resume-me');
+        expect(result.pane.branchName).toBe('feature/resume-me');
+        expect(result.pane.worktreePath).toBe(existingWorktreePath);
+        expect(result.pane.prompt).toBe('No initial prompt');
+      }
     });
 
     it('should split tmux pane', async () => {
@@ -282,13 +446,197 @@ describe('Pane Lifecycle Integration Tests', () => {
       );
       expect(splitCall?.[0]).toContain('-c "/target/repo"');
 
-      const worktreeCall = mockExecSync.mock.calls.find(([cmd]) =>
-        typeof cmd === 'string' && cmd.includes('git worktree add')
-      );
-      expect(worktreeCall?.[0]).toContain('cd "/target/repo" && git worktree add "/target/repo/.dmux/worktrees/target-slug"');
+      const bootstrapConfig = getLatestBootstrapConfig();
+      expect(bootstrapConfig.projectRoot).toBe('/target/repo');
+      expect(bootstrapConfig.worktreePath).toBe('/target/repo/.dmux/worktrees/target-slug');
+
+      expect(getSendKeysCommands().some((cmd) =>
+        cmd.includes('/target/repo/.dmux/bootstrap/')
+      )).toBe(true);
     });
 
-    it('should handle slug generation failure (fallback to timestamp)', async () => {
+    it('should split new panes from a visible pane when the newest tracked pane is hidden', async () => {
+      const defaultExecSync = mockExecSync.getMockImplementation();
+      mockExecSync.mockImplementation((command: string, options?: any) => {
+        const cmd = command.toString().trim();
+        if (cmd === 'tmux list-panes -F "#{pane_id}"') {
+          return options?.encoding === 'utf-8'
+            ? '%0\n%1'
+            : Buffer.from('%0\n%1');
+        }
+
+        return defaultExecSync?.(command, options);
+      });
+
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      const result = await createPane(
+        {
+          prompt: 'create visible pane',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [
+            {
+              id: 'dmux-visible',
+              slug: 'visible',
+              prompt: 'visible pane',
+              paneId: '%1',
+              hidden: false,
+              projectRoot: '/test',
+              worktreePath: '/test/.dmux/worktrees/visible',
+            },
+            {
+              id: 'dmux-hidden',
+              slug: 'hidden',
+              prompt: 'hidden pane',
+              paneId: '%9',
+              hidden: true,
+              projectRoot: '/other/repo',
+              worktreePath: '/other/repo/.dmux/worktrees/hidden',
+            },
+          ],
+          slugBase: 'visible-new-pane',
+        },
+        ['claude']
+      );
+      const splitCall = mockExecSync.mock.calls.find(([cmd]) =>
+        typeof cmd === 'string' && cmd.includes('tmux split-window')
+      );
+      expect(splitCall?.[0]).toContain("-t '%1'");
+
+      if ('pane' in result) {
+        expect(result.pane.hidden).toBe(false);
+      }
+    });
+
+    it('should pass branch and base overrides to the pane bootstrap runner', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await createPane(
+        {
+          prompt: 'work on ticket',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          branchNameOverride: 'feat/LIN-123-fix-auth',
+          baseBranchOverride: 'develop',
+        },
+        ['claude']
+      );
+
+      const bootstrapConfig = getLatestBootstrapConfig();
+      expect(bootstrapConfig.worktreePath).toBe('/test/.dmux/worktrees/feat-lin-123-fix-auth');
+      expect(bootstrapConfig.branchName).toBe('feat/LIN-123-fix-auth');
+      expect(bootstrapConfig.resolvedStartPoint).toBe('develop');
+      expect(bootstrapConfig.pane.branchName).toBe('feat/LIN-123-fix-auth');
+    });
+
+    it('should append agent suffix for explicit branch overrides', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await createPane(
+        {
+          prompt: 'A/B compare fix',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          branchNameOverride: 'feat/LIN-777-ab-test',
+          slugSuffix: 'opencode',
+        },
+        ['claude']
+      );
+
+      const bootstrapConfig = getLatestBootstrapConfig();
+      expect(bootstrapConfig.worktreePath).toBe('/test/.dmux/worktrees/feat-lin-777-ab-test-opencode');
+      expect(bootstrapConfig.branchName).toBe('feat/LIN-777-ab-test-opencode');
+      expect(bootstrapConfig.pane.branchName).toBe('feat/LIN-777-ab-test-opencode');
+    });
+
+    it('should fail early when target worktree path already exists', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      fsMock.existsSync.mockImplementation((targetPath: string) => {
+        const value = String(targetPath);
+        if (value === '/test/.dmux/worktrees/feat-lin-999-existing') {
+          return true;
+        }
+        return !value.includes('.dmux/worktrees/');
+      });
+
+      await expect(
+        createPane(
+          {
+            prompt: 'collision test',
+            agent: 'claude',
+            projectName: 'test-project',
+            existingPanes: [],
+            branchNameOverride: 'feat/LIN-999-existing',
+          },
+          ['claude']
+        )
+      ).rejects.toThrow('Worktree path already exists');
+    });
+
+    it('should reject invalid branch-name overrides', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(
+        createPane(
+          {
+            prompt: 'invalid branch override',
+            agent: 'claude',
+            projectName: 'test-project',
+            existingPanes: [],
+            branchNameOverride: 'feat/../bad',
+          },
+          ['claude']
+        )
+      ).rejects.toThrow('Invalid branch name override');
+    });
+
+    it('should reject invalid base-branch overrides', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await expect(
+        createPane(
+          {
+            prompt: 'invalid base override',
+            agent: 'claude',
+            projectName: 'test-project',
+            existingPanes: [],
+            baseBranchOverride: 'dev..bad',
+          },
+          ['claude']
+        )
+      ).rejects.toThrow('Invalid base branch override');
+    });
+
+    it('should destroy the welcome pane when tracked shell panes make the pane list non-empty', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await createPane(
+        {
+          prompt: 'investigate issue',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [
+            {
+              id: 'dmux-1',
+              slug: 'shell-1',
+              prompt: '',
+              paneId: '%5',
+              type: 'shell',
+              shellType: 'zsh',
+            },
+          ],
+        },
+        ['claude']
+      );
+
+      expect(destroyWelcomePaneCoordinatedMock).toHaveBeenCalledWith('/test');
+    });
+
+    it('should handle slug generation failure with a prompt-based fallback', async () => {
       // Mock OpenRouter API failure
       const mockFetch = vi.fn(() =>
         Promise.reject(new Error('API timeout'))
@@ -307,9 +655,9 @@ describe('Pane Lifecycle Integration Tests', () => {
         ['claude']
       );
 
-      // Should fallback to timestamp-based slug
+      // Should fallback to a useful local slug instead of a timestamp
       if ('pane' in result) {
-        expect(result.pane.slug).toMatch(/dmux-\d+/);
+        expect(result.pane.slug).toBe('test-prompt');
       }
     });
 
@@ -349,6 +697,113 @@ describe('Pane Lifecycle Integration Tests', () => {
     });
   });
 
+  describe('Worktree Setup Failure Handling', () => {
+    // Slow or failing setup is now handled by the pane-local bootstrap runner.
+    // createPane should return after showing that runner, while the runner
+    // gates the actual agent launch behind worktree setup and hooks.
+
+    const getKillPaneCommands = () =>
+      mockExecSync.mock.calls
+        .map(([cmd]) => (typeof cmd === 'string' ? cmd : ''))
+        .filter((cmd) => cmd.includes('kill-pane'));
+
+    it('keeps the pane visible and delegates a missing worktree failure to bootstrap', async () => {
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      const missingWorktreePath = '/test/.dmux/worktrees/does-not-exist';
+
+      const result = await createPane(
+        {
+          prompt: 'fix auth bug',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+          existingWorktree: {
+            slug: 'does-not-exist',
+            worktreePath: missingWorktreePath,
+            branchName: 'does-not-exist',
+          },
+        },
+        ['claude']
+      );
+
+      expect(result.needsAgentChoice).toBe(false);
+
+      expect(
+        getKillPaneCommands().some((cmd) => cmd.includes('%1'))
+      ).toBe(false);
+
+      const bootstrapConfig = getLatestBootstrapConfig();
+      expect(bootstrapConfig.existingWorktree).toBe(true);
+      expect(bootstrapConfig.worktreePath).toBe(missingWorktreePath);
+
+      const sendKeys = getSendKeysCommands();
+      expect(sendKeys.some((cmd) => cmd.includes('paneBootstrapRunner'))).toBe(true);
+      expect(sendKeys.some((cmd) =>
+        cmd.includes('claude') && !cmd.includes('paneBootstrapRunner')
+      )).toBe(false);
+    });
+
+    it('does not block createPane on worktree_created hook execution', async () => {
+      const { triggerHookSync } = await import('../../src/utils/hooks.js');
+      vi.mocked(triggerHookSync).mockResolvedValueOnce({
+        success: false,
+        error: 'dependency install failed',
+      });
+
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      const result = await createPane(
+        {
+          prompt: 'add dashboard',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+        },
+        ['claude']
+      );
+
+      expect(result.needsAgentChoice).toBe(false);
+      expect(triggerHookSync).not.toHaveBeenCalled();
+      expect(
+        getKillPaneCommands().some((cmd) => cmd.includes('%1'))
+      ).toBe(false);
+
+      const sendKeys = getSendKeysCommands();
+      expect(sendKeys.some((cmd) => cmd.includes('paneBootstrapRunner'))).toBe(true);
+      expect(sendKeys.some((cmd) =>
+        cmd.includes('claude') && !cmd.includes('paneBootstrapRunner')
+      )).toBe(false);
+    });
+
+    it('hands hook-gated agent launch to the bootstrap runner', async () => {
+      const { triggerHookSync } = await import('../../src/utils/hooks.js');
+      const { createPane } = await import('../../src/utils/paneCreation.js');
+
+      await createPane(
+        {
+          prompt: 'hook ordering test',
+          agent: 'claude',
+          projectName: 'test-project',
+          existingPanes: [],
+        },
+        ['claude']
+      );
+
+      expect(triggerHookSync).not.toHaveBeenCalled();
+
+      const bootstrapConfig = getLatestBootstrapConfig();
+      expect(bootstrapConfig.agent).toBe('claude');
+      expect(bootstrapConfig.pane.agent).toBe('claude');
+      expect(bootstrapConfig.pane.worktreePath).toBe(bootstrapConfig.worktreePath);
+
+      const directAgentLaunch = getSendKeysCommands().some((cmd) =>
+        cmd.includes('claude') && !cmd.includes('paneBootstrapRunner')
+      );
+      expect(directAgentLaunch).toBe(false);
+    });
+  });
+
   describe('Pane Closure Flow', () => {
     it('should present choice dialog for worktree panes', async () => {
       const { closePane } = await import('../../src/actions/implementations/closeAction.js');
@@ -362,6 +817,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'dmux-test',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -393,6 +849,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'dmux-test',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -426,6 +883,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'dmux-test',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -463,6 +921,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'dmux-test',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),
@@ -494,6 +953,7 @@ describe('Pane Lifecycle Integration Tests', () => {
       };
 
       const mockContext: ActionContext = {
+        sessionName: 'dmux-test',
         projectName: 'test-project',
         panes: [testPane],
         savePanes: vi.fn(),

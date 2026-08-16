@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import type { DmuxConfig } from '../types.js';
+import type { DmuxConfig, DmuxThemeName } from '../types.js';
 import { createWelcomePane, welcomePaneExists, destroyWelcomePane } from './welcomePane.js';
 import { LogService } from '../services/LogService.js';
 import { atomicWriteJsonSync } from './atomicWrite.js';
@@ -94,7 +94,8 @@ export function destroyWelcomePaneCoordinated(projectRoot: string): boolean {
  */
 export async function createWelcomePaneCoordinated(
   projectRoot: string,
-  controlPaneId: string
+  controlPaneId: string,
+  themeName?: DmuxThemeName
 ): Promise<boolean> {
   const logService = LogService.getInstance();
 
@@ -121,7 +122,7 @@ export async function createWelcomePaneCoordinated(
     }
 
     // Create the welcome pane
-    const welcomePaneId = await createWelcomePane(controlPaneId, projectRoot);
+    const welcomePaneId = await createWelcomePane(controlPaneId, projectRoot, themeName);
 
     if (welcomePaneId) {
       // Update config with new welcome pane ID (use atomic write)
@@ -137,6 +138,63 @@ export async function createWelcomePaneCoordinated(
     return false;
   } finally {
     releaseCreationLock();
+  }
+}
+
+export async function syncWelcomePaneVisibility(
+  projectRoot: string,
+  controlPaneId: string | undefined,
+  shouldShowWelcome: boolean,
+  themeName?: DmuxThemeName
+): Promise<boolean> {
+  if (!controlPaneId) {
+    return false;
+  }
+
+  const logService = LogService.getInstance();
+
+  try {
+    const configPath = path.join(projectRoot, '.dmux', 'dmux.config.json');
+
+    if (!fs.existsSync(configPath)) {
+      return false;
+    }
+
+    const configContent = fs.readFileSync(configPath, 'utf-8');
+    const config: DmuxConfig = JSON.parse(configContent);
+    const hasTrackedWelcomePane = !!config.welcomePaneId;
+    const hasLiveWelcomePane = hasTrackedWelcomePane
+      ? await welcomePaneExists(config.welcomePaneId)
+      : false;
+
+    if (shouldShowWelcome) {
+      if (hasLiveWelcomePane) {
+        return true;
+      }
+
+      return await createWelcomePaneCoordinated(projectRoot, controlPaneId, themeName);
+    }
+
+    if (!hasTrackedWelcomePane) {
+      return true;
+    }
+
+    if (hasLiveWelcomePane && config.welcomePaneId) {
+      await destroyWelcomePane(config.welcomePaneId);
+    }
+
+    delete config.welcomePaneId;
+    config.lastUpdated = new Date().toISOString();
+    atomicWriteJsonSync(configPath, config);
+    return true;
+  } catch (error) {
+    logService.error(
+      'Failed to sync welcome pane visibility',
+      'WelcomePaneManager',
+      undefined,
+      error instanceof Error ? error : undefined
+    );
+    return false;
   }
 }
 
