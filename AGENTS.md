@@ -31,7 +31,7 @@ Core behavior:
 - `src/services/DmuxAttentionService.ts`: attention-notification coordinator for idle/waiting panes
 - `src/services/InferenceService.ts`: provider-neutral text inference, dynamic model discovery, and primary/backup failover
 - `src/services/CodexAppServerClient.ts`: ChatGPT subscription auth/model/inference bridge through Codex app-server
-- `src/services/TerminalPaneNamingService.ts`: settled screen capture tracking and periodic LLM-based naming for regular terminals; human names are protected
+- `src/services/TerminalPaneNamingService.ts`: LLM-based naming for regular terminals — untitled panes are checked aggressively and named from streaming output; titled panes only rename from settled output on a relaxed cadence; human names are protected
 - `src/utils/paneAgentTracking.ts`: process-tree detection for agents launched manually in any pane, plus exact Claude/Codex session capture used by crash restoration
 - `src/hooks/usePaneLoading.ts`: persisted pane loading/rebinding and recreation for both worktree and terminal panes
 - `src/hooks/useInputHandling.ts`: keyboard and menu action handling

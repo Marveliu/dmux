@@ -3,14 +3,18 @@ import type { DmuxPane } from '../types.js';
 import { callInference } from '../utils/aiMerge.js';
 import { hasConfiguredInferenceSync } from './InferenceService.js';
 import { capturePaneContentAsync } from '../utils/paneCapture.js';
+import { execAsync } from '../utils/execAsync.js';
 import { getPaneTmuxTitle, sanitizePaneDisplayName } from '../utils/paneTitle.js';
 import { LogService } from './LogService.js';
 import { TmuxService } from './TmuxService.js';
 
-export const TERMINAL_NAME_CAPTURE_INTERVAL_MS = 10_000;
+export const TERMINAL_NAME_CAPTURE_INTERVAL_MS = 2_500;
+export const TERMINAL_NAME_NAMED_CHECK_INTERVAL_MS = 10_000;
 export const TERMINAL_NAME_SETTLE_MS = 15_000;
+export const TERMINAL_NAME_FAST_SETTLE_MS = 5_000;
 export const TERMINAL_RENAME_COOLDOWN_MS = 5 * 60_000;
 const TERMINAL_NAME_FAILURE_RETRY_MS = 60_000;
+const TERMINAL_NAME_FAST_FAILURE_RETRY_MS = 10_000;
 const TERMINAL_NAME_MAX_LENGTH = 48;
 const TERMINAL_CAPTURE_LINES = 60;
 const TERMINAL_CAPTURE_MAX_CHARS = 6_000;
@@ -20,20 +24,59 @@ const TERMINAL_HISTORY_MAX_CHARS = 12_000;
 interface CaptureState {
   fingerprint: string;
   stableSince: number;
+  lastCapturedAt: number;
   meaningful: boolean;
+  meaningfulSince?: number;
+  lastContent: string;
+  activitySignature?: string;
+  lastRejectedFingerprint?: string;
   history: string[];
   lastAttemptAt?: number;
+}
+
+export interface PaneActivity {
+  signature: string;
+  alternateScreen: boolean;
+}
+
+/**
+ * One batched tmux call covering every pane on the server. Output only
+ * reaches a pane's scrollback or moves its cursor when something actually
+ * ran, so comparing these counters between ticks detects change without
+ * capturing any content.
+ */
+async function probeTmuxPaneActivity(): Promise<Map<string, PaneActivity> | null> {
+  const output = await execAsync(
+    `tmux list-panes -a -F '#{pane_id}|#{alternate_on}|#{history_bytes},#{cursor_x},#{cursor_y},#{pane_width},#{pane_height},#{pane_current_command}'`,
+    { silent: true, timeout: 5000 }
+  );
+  if (!output) return null;
+
+  const activity = new Map<string, PaneActivity>();
+  for (const line of output.split('\n')) {
+    const first = line.indexOf('|');
+    const second = line.indexOf('|', first + 1);
+    if (first <= 0 || second < 0) continue;
+    activity.set(line.slice(0, first), {
+      alternateScreen: line.slice(first + 1, second) === '1',
+      signature: line.slice(second + 1),
+    });
+  }
+  return activity.size > 0 ? activity : null;
 }
 
 interface TerminalPaneNamingOptions {
   getPanes: () => DmuxPane[];
   savePanes: (panes: DmuxPane[]) => Promise<void>;
   capturePane?: (paneId: string) => Promise<string>;
+  probePaneActivity?: () => Promise<Map<string, PaneActivity> | null>;
   generateName?: (content: string, pane: DmuxPane) => Promise<string | null>;
   canGenerateName?: () => boolean;
   setPaneTitle?: (paneId: string, title: string) => Promise<void>;
   intervalMs?: number;
+  namedCheckIntervalMs?: number;
   settleMs?: number;
+  fastSettleMs?: number;
   renameCooldownMs?: number;
 }
 
@@ -167,11 +210,14 @@ export class TerminalPaneNamingService {
   private readonly getPanes: () => DmuxPane[];
   private readonly savePanes: (panes: DmuxPane[]) => Promise<void>;
   private readonly capturePane: (paneId: string) => Promise<string>;
+  private readonly probePaneActivity: () => Promise<Map<string, PaneActivity> | null>;
   private readonly generateName: (content: string, pane: DmuxPane) => Promise<string | null>;
   private readonly canGenerateName: () => boolean;
   private readonly setPaneTitle: (paneId: string, title: string) => Promise<void>;
   private readonly intervalMs: number;
+  private readonly namedCheckIntervalMs: number;
   private readonly settleMs: number;
+  private readonly fastSettleMs: number;
   private readonly renameCooldownMs: number;
   private readonly captureStates = new Map<string, CaptureState>();
   private readonly inFlight = new Set<string>();
@@ -183,13 +229,16 @@ export class TerminalPaneNamingService {
     this.savePanes = options.savePanes;
     this.capturePane = options.capturePane
       || ((paneId) => capturePaneContentAsync(paneId, TERMINAL_CAPTURE_LINES));
+    this.probePaneActivity = options.probePaneActivity || probeTmuxPaneActivity;
     this.generateName = options.generateName || generateTerminalPaneName;
     this.canGenerateName = options.canGenerateName
       || (() => hasConfiguredInferenceSync());
     this.setPaneTitle = options.setPaneTitle
       || ((paneId, title) => TmuxService.getInstance().setPaneTitle(paneId, title));
     this.intervalMs = options.intervalMs ?? TERMINAL_NAME_CAPTURE_INTERVAL_MS;
+    this.namedCheckIntervalMs = options.namedCheckIntervalMs ?? TERMINAL_NAME_NAMED_CHECK_INTERVAL_MS;
     this.settleMs = options.settleMs ?? TERMINAL_NAME_SETTLE_MS;
+    this.fastSettleMs = options.fastSettleMs ?? TERMINAL_NAME_FAST_SETTLE_MS;
     this.renameCooldownMs = options.renameCooldownMs ?? TERMINAL_RENAME_COOLDOWN_MS;
   }
 
@@ -212,93 +261,188 @@ export class TerminalPaneNamingService {
 
     try {
       const panes = this.getPanes();
-      const eligibleIds = new Set(
-        panes.filter(isEligibleTerminalPane).map((pane) => pane.id)
-      );
+      const eligible = panes.filter(isEligibleTerminalPane);
+      const eligibleIds = new Set(eligible.map((pane) => pane.id));
       for (const paneId of this.captureStates.keys()) {
         if (!eligibleIds.has(paneId)) this.captureStates.delete(paneId);
       }
 
+      // A tick where every pane is throttled or busy costs no tmux calls at
+      // all; otherwise one batched probe decides which panes need capturing.
+      const due = eligible.filter((pane) => this.isDueForInspection(pane, now));
+      if (due.length === 0) return;
+      const activity = await this.probePaneActivity();
+
       await Promise.all(
-        panes
-          .filter(isEligibleTerminalPane)
-          .map((pane) => this.inspectPane(pane, now))
+        due.map((pane) => this.inspectPane(
+          pane,
+          now,
+          activity?.get(pane.paneId) ?? null,
+          activity !== null
+        ))
       );
     } finally {
       this.checking = false;
     }
   }
 
-  private async inspectPane(pane: DmuxPane, now: number): Promise<void> {
-    if (this.inFlight.has(pane.id)) return;
+  // Once a pane has earned a title, watching it closely buys nothing: fall
+  // back to a relaxed cadence. Untitled panes are looked at on every tick so
+  // a fresh terminal gets its first title quickly.
+  private isDueForInspection(pane: DmuxPane, now: number): boolean {
+    if (this.inFlight.has(pane.id)) return false;
+    const state = this.captureStates.get(pane.id);
+    return !(
+      Boolean(pane.displayName)
+      && state
+      && now - state.lastCapturedAt < this.namedCheckIntervalMs
+    );
+  }
+
+  private async inspectPane(
+    pane: DmuxPane,
+    now: number,
+    activity: PaneActivity | null,
+    probed: boolean
+  ): Promise<void> {
+    if (!this.isDueForInspection(pane, now)) return;
+    // A pane absent from a successful probe no longer exists in tmux.
+    if (probed && !activity) return;
+
+    const hasAutoName = Boolean(pane.displayName);
+    const previousState = this.captureStates.get(pane.id);
+
+    // When the probe shows no counter movement since the last look, the pane
+    // produced no new output: reuse the previous capture instead of spawning
+    // another capture-pane process. Full-screen apps (alternate_on) can
+    // repaint without moving any counter, so they are always recaptured.
+    const unchanged = Boolean(
+      activity
+      && !activity.alternateScreen
+      && previousState?.activitySignature
+      && previousState.activitySignature === activity.signature
+    );
 
     let content: string;
-    try {
-      content = normalizeTerminalCapture(await this.capturePane(pane.paneId));
-    } catch {
+    if (unchanged) {
+      content = previousState!.lastContent;
+    } else {
+      try {
+        content = normalizeTerminalCapture(await this.capturePane(pane.paneId));
+      } catch {
+        return;
+      }
+    }
+    if (!content) {
+      // Keep an existing state through a cleared or transiently empty screen
+      // so an empty pane is not recaptured every tick.
+      if (previousState) {
+        previousState.lastCapturedAt = now;
+        previousState.activitySignature = activity?.signature;
+      } else {
+        this.captureStates.set(pane.id, {
+          fingerprint: fingerprintContent(''),
+          stableSince: now,
+          lastCapturedAt: now,
+          meaningful: false,
+          lastContent: '',
+          activitySignature: activity?.signature,
+          history: [],
+        });
+      }
       return;
     }
-    if (!content) return;
 
     const fingerprint = fingerprintContent(content);
-    const existingState = this.captureStates.get(pane.id);
-    if (!existingState || existingState.fingerprint !== fingerprint) {
+    let state = this.captureStates.get(pane.id);
+    if (!state || state.fingerprint !== fingerprint) {
       const meaningful = hasMeaningfulTerminalWork(content);
-      this.captureStates.set(pane.id, {
+      state = {
         fingerprint,
         stableSince: now,
+        lastCapturedAt: now,
         meaningful,
-        history: appendTerminalHistory(existingState?.history || [], content, meaningful),
-      });
-      return;
+        meaningfulSince: meaningful ? state?.meaningfulSince ?? now : undefined,
+        lastContent: content,
+        activitySignature: activity?.signature,
+        lastAttemptAt: state?.lastAttemptAt,
+        history: appendTerminalHistory(state?.history || [], content, meaningful),
+      };
+      this.captureStates.set(pane.id, state);
+      // A titled pane only renames from settled output; an untitled one keeps
+      // going, since a streaming agent may never hold a stable screen.
+      if (hasAutoName) return;
+    } else {
+      state.lastCapturedAt = now;
+      state.activitySignature = activity?.signature;
     }
 
-    if (!existingState.meaningful || now - existingState.stableSince < this.settleMs) {
-      return;
-    }
+    if (!state.meaningful) return;
+
+    const readyAt = hasAutoName
+      ? state.stableSince + this.settleMs
+      : (state.meaningfulSince ?? now) + this.fastSettleMs;
+    if (now < readyAt) return;
+
     if (pane.lastAutoNameFingerprint === fingerprint) return;
+    // Content that already produced an unusable name will produce one again;
+    // wait for the pane to show something new before asking the model again.
+    if (state.lastRejectedFingerprint === fingerprint) return;
     if (
       pane.lastAutoNamedAt
       && now - pane.lastAutoNamedAt < this.renameCooldownMs
     ) {
       return;
     }
+    const failureRetryMs = hasAutoName
+      ? TERMINAL_NAME_FAILURE_RETRY_MS
+      : TERMINAL_NAME_FAST_FAILURE_RETRY_MS;
     if (
-      existingState.lastAttemptAt
-      && now - existingState.lastAttemptAt < TERMINAL_NAME_FAILURE_RETRY_MS
+      state.lastAttemptAt
+      && now - state.lastAttemptAt < failureRetryMs
     ) {
       return;
     }
 
-    existingState.lastAttemptAt = now;
+    state.lastAttemptAt = now;
     this.inFlight.add(pane.id);
     try {
       const generatedName = await this.generateName(
-        formatTerminalHistory(existingState.history, content),
+        formatTerminalHistory(state.history, content),
         pane
       );
-      if (!generatedName || isLowInformationTerminalName(generatedName)) return;
+      if (!generatedName || isLowInformationTerminalName(generatedName)) {
+        state.lastRejectedFingerprint = fingerprint;
+        return;
+      }
 
-      // Do not apply a name generated from stale output if the user started
-      // another command while the model request was in flight.
+      // Do not replace a title using stale output if the user started another
+      // command while the model request was in flight. An untitled pane keeps
+      // the name anyway: its screen churns constantly while an agent streams,
+      // and an early title about the pane's purpose beats having none.
       const latestContent = normalizeTerminalCapture(await this.capturePane(pane.paneId));
       const latestFingerprint = latestContent
         ? fingerprintContent(latestContent)
         : '';
       if (latestFingerprint !== fingerprint) {
         if (latestFingerprint) {
+          const latestMeaningful = hasMeaningfulTerminalWork(latestContent);
           this.captureStates.set(pane.id, {
             fingerprint: latestFingerprint,
             stableSince: now,
-            meaningful: hasMeaningfulTerminalWork(latestContent),
+            lastCapturedAt: now,
+            meaningful: latestMeaningful,
+            meaningfulSince: latestMeaningful ? state.meaningfulSince ?? now : undefined,
+            lastContent: latestContent,
+            lastAttemptAt: state.lastAttemptAt,
             history: appendTerminalHistory(
-              existingState.history,
+              state.history,
               latestContent,
-              hasMeaningfulTerminalWork(latestContent)
+              latestMeaningful
             ),
           });
         }
-        return;
+        if (hasAutoName) return;
       }
 
       const latestPanes = this.getPanes();

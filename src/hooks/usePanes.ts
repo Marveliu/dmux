@@ -268,8 +268,10 @@ export default function usePanes(
     });
   };
 
-  // Regular terminals are named from settled screen captures. The service reads
-  // through panesRef so a late LLM response cannot overwrite newer pane state.
+  // Regular terminals are named from screen captures: aggressively until a
+  // pane earns its first title, then only from settled output. The service
+  // reads through panesRef so a late LLM response cannot overwrite newer
+  // pane state.
   useEffect(() => {
     if (skipLoading) return;
 
